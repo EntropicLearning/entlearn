@@ -1,0 +1,83 @@
+# marimo
+*__marimo__/
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Distribution / packaging
+.Python
+.venv/
+env/
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+include/
+man/
+venv/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+pip-selfcheck.json
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+
+# VSCode
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Ruff
+.ruff_cache
+
+# Local Git worktrees
+.worktrees/
+
+# MkDocs build output
+site/
+
+# Local CLAUDE.md
+CLAUDE.local.md
+
+# Per-machine agent wiring (untracked symlinks and settings)
+/design
+.claude/skills
+.agents/skills
+.claude/settings.local.json
+docs/ideas.md
+references/
+# Fixed-seed notebook ledgers: at a fixed seed the file IS the run, so it is
+# reproduced rather than tracked.
+examples/ledgers/
+
+# Mutation-testing and coverage working files (the /harden pass)
+mutants/
+mutmut-stats.json
+.coverage
+coverage.json

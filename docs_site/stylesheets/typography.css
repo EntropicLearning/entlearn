@@ -1,0 +1,27 @@
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6,
+.md-header__title,
+.md-tabs__link,
+.md-nav__title,
+.md-nav__link {
+  font-family: "Space Mono", monospace;
+}
+
+.md-header__title {
+  font-size: 1rem;
+}
+
+.md-tabs__link,
+.md-nav__title,
+.md-nav__link {
+  font-size: 0.75rem;
+}
+
+.md-typeset .mermaid {
+  display: flex;
+  justify-content: center;
+}

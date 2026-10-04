@@ -1,0 +1,143 @@
+site_name: Entlearn
+site_description: Tensor-native entropic-learning primitives for PyTorch.
+site_url: https://entropiclearning.github.io/entlearn/
+repo_url: https://github.com/EntropicLearning/entlearn
+repo_name: EntropicLearning/entlearn
+edit_uri: edit/main/docs_site/
+
+docs_dir: docs_site
+
+# A strict build fails on a link to a heading that does not exist.
+validation:
+  links:
+    anchors: warn
+
+extra_css:
+  - stylesheets/figures.css
+  - stylesheets/typography.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+  - https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js
+  - https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16/dist/plot.umd.min.js
+  - javascripts/figures.js
+
+extra:
+  version:
+    provider: mike
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  font:
+    code: Space Mono
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            docstring_section_style: table
+            show_source: true
+            show_root_heading: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            separate_signature: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+  # Emits llms.txt and a Markdown copy of each listed page at build time, so agents
+  # can read the site as Markdown. Sections are globs, so a new page joins its
+  # section without an edit here.
+  - llmstxt:
+      markdown_description: >-
+        Entlearn: a pure-tensor PyTorch implementation of EON (Entropy-Optimal
+        Networks), fit by exact block-coordinate descent.
+      sections:
+        Guide:
+          - guide/*.md
+        Concepts:
+          - concepts/*.md
+        API:
+          - reference/*.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.arithmatex:
+      generic: true
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.details
+  - pymdownx.blocks.admonition
+  - pymdownx.blocks.details
+  - pymdownx.blocks.tab
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Introduction: guide/introduction.md
+      - Suitability and scaling: guide/suitability.md
+      - Installation: guide/installation.md
+      - Package and Recipes: guide/package.md
+      - Networks: guide/networks.md
+      - Estimators: guide/estimators.md
+      - Hyperparameters: guide/hyperparameters.md
+      - Model selection: guide/model_selection.md
+      - Manifold: guide/manifold.md
+      - Plotting: guide/plotting.md
+      - Troubleshooting: guide/troubleshooting.md
+  - Concepts:
+      - Overview: concepts/index.md
+      - Representing observations: concepts/representation.md
+      - The objective: concepts/loss.md
+      - Learning the model: concepts/learning.md
+      - Predicting new observations: concepts/prediction.md
+      - Notation: concepts/notation.md
+      - Glossary: concepts/glossary.md
+  - Tutorials:
+      - Overview: tutorials/index.md
+      - Tutorial series: tutorials/series.md
+  - API:
+      - reference/index.md
+      - Recipe: reference/recipe.md
+      - Network: reference/network.md
+      - Plotting: reference/plotting.md
+      - Optional helpers: reference/helpers.md
+      - Scikit-learn: reference/scikit_adapter.md
+      - Primitives: reference/primitives.md

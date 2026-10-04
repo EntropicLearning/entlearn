@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref; a new push supersedes the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Both supported CPU cells. The float32 cell catches results that are exact
+      # only in float64; let it report even when the other cell has already failed.
+      fail-fast: false
+      matrix:
+        dtype: [float64, float32]
+    env:
+      EON_TEST_DTYPE: ${{ matrix.dtype }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      # The docs group (mkdocs stack) is not needed to run the tests.
+      - name: Sync the environment
+        run: uv sync --no-group docs
+
+      # Coverage is a property of the lines the suite reaches, not of the dtype, so
+      # only one cell pays for it.
+      - name: Run the test suite with coverage
+        if: matrix.dtype == 'float64'
+        run: uv run --no-sync pytest --cov=entlearn --cov-report=term-missing:skip-covered
+
+      - name: Run the test suite
+        if: matrix.dtype != 'float64'
+        run: uv run --no-sync pytest
+
+      - name: Check release documentation interfaces
+        run: uv run --no-sync pytest scripts/test_release_docs.py
+
+      - name: Coverage summary
+        if: matrix.dtype == 'float64'
+        run: uv run --no-sync coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      # ruff needs only itself — skip the project (and torch) entirely.
+      - name: Sync the dev tools only
+        run: uv sync --only-group dev
+
+      - name: ruff check
+        run: uv run --no-sync ruff check .
+
+      - name: ruff format check
+        run: uv run --no-sync ruff format --check .
+
+  type:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      # ty resolves imports from the environment, so it needs the full project.
+      - name: Sync the environment
+        run: uv sync --no-group docs
+
+      - name: ty check
+        run: uv run --no-sync ty check

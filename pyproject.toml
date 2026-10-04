@@ -1,0 +1,154 @@
+[project]
+name = "entlearn"
+version = "0.1.0"
+description = "Tensor-native entropic-learning primitives for PyTorch"
+readme = "README.md"
+authors = [
+    { name = "Davide Bassetti", email = "bassetti.davide@math.rptu.de" },
+    { name = "Michael Groom", email = "michael.groom@csiro.au" },
+]
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=2.5.2",
+    "safetensors>=0.8.0",
+    "torch>=2.12.0",
+]
+
+[project.urls]
+Documentation = "https://entropiclearning.github.io/entlearn/"
+Source = "https://github.com/EntropicLearning/entlearn"
+Issues = "https://github.com/EntropicLearning/entlearn/issues"
+
+[project.optional-dependencies]
+plotting = ["plotly>=6.0"]
+rich = ["rich>=14"]
+sklearn = ["joblib>=1.4", "narwhals>=2.21.2", "scikit-learn>=1.9.0"]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "marimo>=0.23.14",
+    "narwhals>=2.21.2",
+    "pandas>=2.2.0",
+    "plotly>=6.0",
+    "polars>=1.44.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
+    "rich>=14",
+    "ruff>=0.15.14",
+    "scikit-learn>=1.9.0",
+    "ty>=0.0.69",
+    "optuna-integration[sklearn]>=5.0.0",
+]
+docs = [
+    "mike>=2.2.0",
+    "mkdocs>=1.6.1",
+    "mkdocs-llmstxt>=0.5.0",
+    "mkdocs-material>=9.7.7",
+    "mkdocstrings[python]>=1.0.6",
+    "poethepoet>=0.48.0",
+    "pymdown-extensions>=11.0.1",
+]
+
+[tool.uv]
+# Include the docs group by default so `uv run poe docs` works without --group.
+default-groups = ["dev", "docs"]
+
+[tool.poe.tasks]
+docs = "mkdocs serve"               # live-reload preview at localhost:8000
+docs-build = "mkdocs build --strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "error::entlearn.LossIncreaseWarning",
+    "error:An output with one or more elements was resized:UserWarning",
+]
+
+[tool.coverage.report]
+# An exhaustive match over a closed union ends in assert_never, which no input reaches.
+exclude_also = ['case _:\n\s*assert_never\(', 'assert_never\(']
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+ignore = [
+    "TRY004", 
+    "C408",
+]
+extend-select = [
+    "I",   # isort (import sorting)
+    "D",   # pydocstyle (docstrings)
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]  # tests need not be docstring-complete
+"examples/*.py" = ["D100", "B018", "PLR1711"]
+"scripts/*.py" = ["D100", "B018"]  # derivation scripts: the same relaxations as examples/
+"scripts/test_*.py" = ["D"]  # the derivation script's own test need not be docstring-complete
+
+[tool.ruff.format]
+docstring-code-format = true       # format code blocks inside docstrings
+docstring-code-line-length = "dynamic"
+
+[tool.ty.src]
+exclude = ["examples/**", "scripts/**"]
+
+[[tool.ty.overrides]]
+include = ["tests/**"]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
+not-subscriptable = "ignore"
+invalid-argument-type = "ignore"
+no-matching-overload = "ignore"
+unsupported-operator = "ignore"
+invalid-assignment = "ignore"
+
+[tool.mutmut]
+# Mutation testing (the /harden pass). forkserver: torch deadlocks under plain fork.
+# The deselected tests cannot pass on mutmut's rewritten tree.
+source_paths = ["src/entlearn"]
+mutate_only_covered_lines = true
+process_isolation = "forkserver"
+pytest_add_cli_args = [
+    "--deselect",
+    "tests/scikit_adapter/test_warm_start.py::TestRouting::test_unfitted_warm_start_warns_once_then_continues",
+    "--deselect",
+    "tests/scikit_adapter/test_staging.py::TestTabularStaging::test_categorical_only_and_dropped_columns_keep_original_query_width",
+    "--deselect",
+    "tests/network/test_warnings.py::TestFitWarnings::test_lifecycle_warnings_are_attributed_to_the_calling_line",
+    "--deselect",
+    "tests/network/test_dispatch.py::TestMapSeeds::test_process_request_inside_thread_uses_threads_with_a_warning",
+    "--deselect",
+    "tests/network/test_dispatch.py::TestMapSeeds::test_worker_warnings_reach_the_caller_in_seed_order",
+    "--deselect",
+    "tests/network/test_warnings.py::TestFitWarnings::test_an_initialisation_warning_reaches_the_calling_line_on_every_backend",
+    "--deselect",
+    "tests/network/test_warnings.py::TestFitWarnings::test_a_candidate_warning_keeps_its_category_and_the_calling_line",
+]

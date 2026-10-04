@@ -1,0 +1,15 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap");
+
+:root {
+  --marimo-heading-font: "Space Mono", monospace;
+  --eon-accent: #ff5722;
+}
+
+[data-testid="range"],
+[data-testid="thumb"] {
+  background-color: var(--eon-accent) !important;
+  border-color: var(--eon-accent) !important;
+}
+[data-testid="track"] {
+  background-color: color-mix(in srgb, currentColor 15%, transparent) !important;
+}

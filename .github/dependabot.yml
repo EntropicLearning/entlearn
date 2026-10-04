@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Refresh uv.lock weekly, into dev; bumps reach main with the next dev merge.
+  - package-ecosystem: "uv"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    groups:
+      # One PR for every minor and patch bump; majors stay separate so a breaking
+      # release can be reviewed on its own.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Keep the action pins current, into dev, as one PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]

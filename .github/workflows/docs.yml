@@ -1,0 +1,72 @@
+name: docs
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref; a new push supersedes the in-flight run.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Strict-build validation on every push and pull request, in both the public and
+    # development repos.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Build the docs
+        run: uv run --group docs mkdocs build --strict
+
+  deploy:
+    # Versioned publishing only: a released version plus the "latest" alias, via
+    # mike, and only from the public repo. dev is never published; a push to dev or
+    # to the development repo's main only exercises the strict build above.
+    needs: build
+    if: github.repository == 'EntropicLearning/entlearn' && github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Configure git identity for mike's gh-pages commits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Release tags are vX.Y.Z; the site version drops the v (/0.1.0/), which is
+      # the path the entlearn skills link to.
+      - name: Deploy the versioned docs with mike
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run --group docs mike deploy --push --update-aliases "${TAG#v}" latest
+          uv run --group docs mike set-default --push latest

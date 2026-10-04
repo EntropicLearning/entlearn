@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use entlearn, please cite both the software and the paper below."
+title: "entlearn: Entropy-Optimal Networks in PyTorch"
+type: software
+authors:
+  - given-names: Davide
+    family-names: Bassetti
+  - given-names: Michael
+    family-names: Groom
+version: 0.1.0
+license: AGPL-3.0-only
+repository-code: "https://github.com/EntropicLearning/entlearn"
+url: "https://entropiclearning.github.io/entlearn/"
+references:
+  - type: article
+    title: "An entropy-optimal path to humble AI"
+    authors:
+      - given-names: Davide
+        family-names: Bassetti
+      - given-names: Lukáš
+        family-names: Pospíšil
+      - given-names: Michael
+        family-names: Groom
+      - given-names: Terence J.
+        family-names: O'Kane
+      - given-names: Illia
+        family-names: Horenko
+    year: 2025
+    journal: arXiv preprint
+    identifiers:
+      - type: other
+        value: "arXiv:2506.17940"
+    url: "https://arxiv.org/abs/2506.17940"

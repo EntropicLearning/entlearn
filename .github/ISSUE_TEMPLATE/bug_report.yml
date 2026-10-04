@@ -1,0 +1,25 @@
+name: Bug report
+description: Something behaves incorrectly
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest script that shows the problem — include seeds.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, package version, torch version, device (CPU/CUDA).
+    validations:
+      required: true
