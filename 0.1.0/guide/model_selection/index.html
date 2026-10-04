@@ -1,0 +1,2326 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Tensor-native entropic-learning primitives for PyTorch.">
+      
+      
+      
+        <link rel="canonical" href="https://entropiclearning.github.io/entlearn/0.1.0/guide/model_selection/">
+      
+      
+        <link rel="prev" href="../hyperparameters/">
+      
+      
+        <link rel="next" href="../manifold/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Model selection - Entlearn</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CSpace+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Space Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/figures.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/typography.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-orange" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#model-selection" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Entlearn" class="md-header__button md-logo" aria-label="Entlearn" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Entlearn
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Model selection
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-orange" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-orange" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/EntropicLearning/entlearn" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    EntropicLearning/entlearn
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../introduction/" class="md-tabs__link">
+          
+  
+  
+  Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../concepts/" class="md-tabs__link">
+          
+  
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  API
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Entlearn" class="md-nav__button md-logo" aria-label="Entlearn" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Entlearn
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/EntropicLearning/entlearn" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    EntropicLearning/entlearn
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../introduction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Introduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../suitability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Suitability and scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../package/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Package and Recipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../networks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../estimators/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Estimators
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hyperparameters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperparameters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model selection
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#gridsearchcv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GridSearchCV
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-search-ranges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing search ranges
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#select-an-initialisation-for-one-recipe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select an initialisation for one recipe
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Select an initialisation for one recipe">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#break-ties-with-training-scores" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Break ties with training scores
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supply-initial-states-to-a-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supply initial states to a search
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supply initial states to a search">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rules-for-a-valid-grid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rules for a valid grid
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#select-an-initialisation-with-a-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select an initialisation with a Network
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Select an initialisation with a Network">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#select-by-a-prediction-loss" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select by a prediction loss
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#select-with-validation-folds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select with validation folds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#parallel-initialisations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parallel initialisations
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#optional-optuna-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional Optuna backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifold/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifold
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/representation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Representing observations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The objective
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/learning/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Learning the model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/prediction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predicting new observations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/notation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Notation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../concepts/glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorial series
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/recipe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recipe
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/network/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Network
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/helpers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optional helpers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/scikit_adapter/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scikit-learn
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/primitives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Primitives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#gridsearchcv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GridSearchCV
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#choosing-search-ranges" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing search ranges
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#select-an-initialisation-for-one-recipe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select an initialisation for one recipe
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Select an initialisation for one recipe">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#break-ties-with-training-scores" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Break ties with training scores
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supply-initial-states-to-a-search" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supply initial states to a search
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supply initial states to a search">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#rules-for-a-valid-grid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rules for a valid grid
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#select-an-initialisation-with-a-network" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select an initialisation with a Network
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Select an initialisation with a Network">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#select-by-a-prediction-loss" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select by a prediction loss
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#select-with-validation-folds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Select with validation folds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#parallel-initialisations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parallel initialisations
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#optional-optuna-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional Optuna backend
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="model-selection">Model selection<a class="headerlink" href="#model-selection" title="Permanent link">&para;</a></h1>
+<p>Model selection chooses a model's settings from the data: for example, how many clusters each block has, or which temperatures it uses.
+A search scores each candidate, usually on observations held out from its fit, and keeps the best.</p>
+<p>The estimators support scikit-learn's search tools, so you can explore them using the same parameter paths introduced in <a href="../package/#setting-parameters">Package and Recipes</a>.</p>
+<h2 id="gridsearchcv">GridSearchCV<a class="headerlink" href="#gridsearchcv" title="Permanent link">&para;</a></h2>
+<p><code>GridSearchCV</code> evaluates a parameter grid using cross-validation. It:</p>
+<ul>
+<li>Takes as input a grid of potential parameters</li>
+<li>Fits each combination of parameters on several training folds</li>
+<li>Evaluates each combination on the corresponding validation folds.</li>
+</ul>
+<p>It then selects the combination with the highest mean validation score and, by default, fits it again on all the data supplied to the search.</p>
+<p>Before searching, <em>set aside a test set</em>, or consider using <a href="https://scikit-learn.org/stable/auto_examples/model_selection/plot_nested_cross_validation_iris.html">nested cross-validation</a>.
+The following small example illustrates the API. </p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.datasets</span><span class="w"> </span><span class="kn">import</span> <span class="n">make_moons</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.model_selection</span><span class="w"> </span><span class="kn">import</span> <span class="n">GridSearchCV</span><span class="p">,</span> <span class="n">StratifiedKFold</span><span class="p">,</span> <span class="n">train_test_split</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kn">from</span><span class="w"> </span><span class="nn">entlearn</span><span class="w"> </span><span class="kn">import</span> <span class="n">ClassificationHead</span><span class="p">,</span> <span class="n">Input</span><span class="p">,</span> <span class="n">Recipe</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">entlearn.scikit_adapter</span><span class="w"> </span><span class="kn">import</span> <span class="n">EONClassifier</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1"># Simple synthetic dataset</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="n">X</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">make_moons</span><span class="p">(</span><span class="n">n_samples</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">noise</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="n">X_train</span><span class="p">,</span> <span class="n">X_test</span><span class="p">,</span> <span class="n">y_train</span><span class="p">,</span> <span class="n">y_test</span> <span class="o">=</span> <span class="n">train_test_split</span><span class="p">(</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">X</span><span class="p">,</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="n">y</span><span class="p">,</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">test_size</span><span class="o">=</span><span class="mf">0.25</span><span class="p">,</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n">stratify</span><span class="o">=</span><span class="n">y</span><span class="p">,</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n">random_state</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="p">)</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="c1"># Create a recipe</span>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="n">recipe</span> <span class="o">=</span> <span class="n">Recipe</span><span class="o">.</span><span class="n">chain</span><span class="p">(</span><span class="n">Input</span><span class="p">(</span><span class="n">K</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">epsilon</span><span class="o">=</span><span class="mf">0.1</span><span class="p">),</span> <span class="n">ClassificationHead</span><span class="p">())</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="c1"># Define the parameter grid and the GridSearchCV object</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="n">search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">),</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="p">{</span><span class="s2">&quot;recipe__blocks__input__epsilon&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">]},</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="p">)</span>
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="c1"># Fit the gridsearch</span>
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="n">search</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+</code></pre></div>
+<p>The path <code>recipe__blocks__input__epsilon</code> selects the affiliation temperature of the block named <code>input</code>.
+To extend the parameter grid, you can add more entries to the dictionary. </p>
+<p>Scikit-learn scorers follow the convention that <strong>larger values are better</strong>.
+<code>neg_log_loss</code> returns the negative of the log loss, so that a score closer to zero is better.
+For regression, you could use <code>neg_mean_squared_error</code> or <code>r2</code> with an <code>EONRegressor</code> and a regression recipe.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">search</span><span class="o">.</span><span class="n">best_params_</span><span class="p">)</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">search</span><span class="o">.</span><span class="n">best_score_</span><span class="p">)</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">selected_model</span> <span class="o">=</span> <span class="n">search</span><span class="o">.</span><span class="n">best_estimator_</span>
+</code></pre></div>
+<p><code>best_params_</code> contains the selected settings, <code>best_score_</code> their mean cross-validation score, and <code>best_estimator_</code> the model refitted on all of <code>X_train</code>.
+The selection score is <em>not a final test score</em>. Once you have finished choosing the model, evaluate it on the reserved test set using the same metric:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.metrics</span><span class="w"> </span><span class="kn">import</span> <span class="n">log_loss</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">test_loss</span> <span class="o">=</span> <span class="n">log_loss</span><span class="p">(</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">y_test</span><span class="p">,</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">selected_model</span><span class="o">.</span><span class="n">predict_proba</span><span class="p">(</span><span class="n">X_test</span><span class="p">),</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">labels</span><span class="o">=</span><span class="n">selected_model</span><span class="o">.</span><span class="n">classes_</span><span class="p">,</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="p">)</span>
+</code></pre></div>
+<p>Here, <code>test_loss</code> is a positive loss, so smaller values are better.</p>
+<details class="warning">
+<summary>Fit preprocessing inside each training fold</summary>
+<p>Scaling, imputation and other learned transformations must be fitted using only the training portion of each fold.
+For ordinary grid search, put preprocessing and the estimator in a scikit-learn <code>Pipeline</code>, and pass that pipeline to <code>GridSearchCV</code>.
+Fitting preprocessing before cross-validation lets validation data influence the fitted models.</p>
+<p>For example, you can scale the features before fitting the classifier:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.pipeline</span><span class="w"> </span><span class="kn">import</span> <span class="n">Pipeline</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.preprocessing</span><span class="w"> </span><span class="kn">import</span> <span class="n">MinMaxScaler</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">pipeline</span> <span class="o">=</span> <span class="n">Pipeline</span><span class="p">(</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="p">[</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>        <span class="p">(</span><span class="s2">&quot;scale&quot;</span><span class="p">,</span> <span class="n">MinMaxScaler</span><span class="p">()),</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>        <span class="p">(</span><span class="s2">&quot;model&quot;</span><span class="p">,</span> <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">)),</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="p">]</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="p">)</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="n">pipeline_search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="n">pipeline</span><span class="p">,</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="p">{</span><span class="s2">&quot;model__recipe__blocks__input__epsilon&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">]},</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>    <span class="n">error_score</span><span class="o">=</span><span class="s2">&quot;raise&quot;</span><span class="p">,</span>
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+</code></pre></div>
+<p>The prefix <code>model__</code> selects the estimator step in the pipeline.
+Each fold fits its own scaler using only its training rows. The selected pipeline is then refitted on all of <code>X_train</code> and applies the fitted scaling automatically when predicting.</p>
+</details>
+<p>See the <a href="https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GridSearchCV.html">GridSearchCV reference</a> for more search options.</p>
+<h2 id="choosing-search-ranges">Choosing search ranges<a class="headerlink" href="#choosing-search-ranges" title="Permanent link">&para;</a></h2>
+<p>Which settings should you search, and over which values?</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Search it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>K</code> of each block</td>
+<td>To vary model capacity and computation cost</td>
+</tr>
+<tr>
+<td><code>epsilon</code> of each block</td>
+<td>To vary affiliation concentration</td>
+</tr>
+<tr>
+<td>Connection <code>delta</code></td>
+<td>To vary the balance between connected blocks</td>
+</tr>
+<tr>
+<td><code>epsilon_D</code></td>
+<td>To learn feature weights in a standard <code>Input</code></td>
+</tr>
+<tr>
+<td><code>epsilon_T</code></td>
+<td>To learn instance weights</td>
+</tr>
+<tr>
+<td>The coupling</td>
+<td>To compare M and S transition constraints</td>
+</tr>
+<tr>
+<td><code>delta_cat</code></td>
+<td>When the data mix continuous and categorical features</td>
+</tr>
+<tr>
+<td>Hidden blocks and their settings</td>
+<td>When you add depth</td>
+</tr>
+<tr>
+<td><code>subspace_dimension</code> and <code>alpha</code></td>
+<td>When you use a <code>ManifoldInput</code></td>
+</tr>
+<tr>
+<td><code>epsilon_M</code></td>
+<td>When learned output weights suit your question</td>
+</tr>
+<tr>
+<td>Prediction policy and <code>epsilon_P</code></td>
+<td>They can change the predictions without changing the fitted parameters</td>
+</tr>
+</tbody>
+</table>
+<p>Vary interacting parameters jointly within your search budget. Tuning them separately can miss useful combinations.</p>
+<p>Space the temperatures and <code>delta</code> logarithmically, and the cluster counts linearly.
+As a first coarse search, with continuous features scaled to [0, 1], try:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>epsilon</code></td>
+<td><span class="arithmatex">\(10^{-4}\)</span> to <span class="arithmatex">\(10^{-1}\)</span></td>
+</tr>
+<tr>
+<td><code>epsilon_D</code></td>
+<td><span class="arithmatex">\(10^{-3}\)</span> to <span class="arithmatex">\(1\)</span></td>
+</tr>
+<tr>
+<td><code>epsilon_T</code></td>
+<td><span class="arithmatex">\(10^{-2}\)</span> to <span class="arithmatex">\(10\)</span></td>
+</tr>
+<tr>
+<td><code>delta</code>, classification</td>
+<td><span class="arithmatex">\(10^{-3}\)</span> to <span class="arithmatex">\(10\)</span></td>
+</tr>
+<tr>
+<td><code>delta</code>, regression</td>
+<td><span class="arithmatex">\(10^{-2}\)</span> to <span class="arithmatex">\(10^{2}\)</span></td>
+</tr>
+</tbody>
+</table>
+<p>The affiliation temperature <code>epsilon</code> is measured on the scale of the <a href="../../concepts/representation/#the-discretisation-error">discretisation error</a>.</p>
+<p>Whichever setting you search, if its best value sits <strong>on a boundary</strong> of its range, consider extending the range in that direction and search again.</p>
+<p>To favour fewer clusters, include a complexity penalty in a custom scorer or search objective, for example accuracy - <code>0.001 * K</code>. This changes the ranking even when prediction scores differ, so choose the penalty to reflect the tradeoff you want.</p>
+<p>The following grid crosses two cluster counts, two temperatures and both couplings of the classification head:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">coarse_search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">),</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="p">{</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>        <span class="s2">&quot;recipe__blocks__input__K&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>        <span class="s2">&quot;recipe__blocks__input__epsilon&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">logspace</span><span class="p">(</span><span class="o">-</span><span class="mi">3</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">tolist</span><span class="p">(),</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>        <span class="s2">&quot;recipe__blocks__output__coupling&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;M&quot;</span><span class="p">,</span> <span class="s2">&quot;S&quot;</span><span class="p">],</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>    <span class="p">},</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+</code></pre></div>
+<p><code>Recipe.chain</code> names the head <code>output</code>, and a hidden connection's coupling is reached through <code>recipe__connections__&lt;name&gt;__coupling</code>.
+Include the current or default settings in the grid, as a control.</p>
+<h2 id="select-an-initialisation-for-one-recipe">Select an initialisation for one recipe<a class="headerlink" href="#select-an-initialisation-for-one-recipe" title="Permanent link">&para;</a></h2>
+<p>An estimator can also compare several initialisations without changing the recipe.
+Set <code>n_inits</code> to the number of candidates and <code>scoring</code> to the metric used to select one:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">initialisation_search</span> <span class="o">=</span> <span class="n">EONClassifier</span><span class="p">(</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">recipe</span><span class="p">,</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">n_inits</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+</code></pre></div>
+<p>With the default <code>cv=None</code>, candidates are compared on their training data (in-sample). 
+With several initialisations and no explicit scorer, the classifier selects by accuracy and the regressor by <span class="arithmatex">\(R^2\)</span>.</p>
+<p>To select using validation scores, pass an integer, a splitter or explicit folds as the estimator's <code>cv</code>.</p>
+<p>The default <code>init_rows=None</code> uses all rows supplied to that estimator fit to generate geometry, <em>including its internal validation rows</em>.
+To exclude those rows, use <code>init_rows=common_train_rows</code> only with folds that have a non-empty common training set, as explained below. </p>
+<h3 id="break-ties-with-training-scores">Break ties with training scores<a class="headerlink" href="#break-ties-with-training-scores" title="Permanent link">&para;</a></h3>
+<p>Exact ties in mean validation score go to the first candidate by default. With <code>return_train_score=True</code>, ties go to the smallest training–validation score gap.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">tie_break_model</span> <span class="o">=</span> <span class="n">EONClassifier</span><span class="p">(</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">recipe</span><span class="p">,</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">n_inits</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="n">return_train_score</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+</code></pre></div>
+<p>The fitted network keeps the scores of every candidate in <code>network_.diagnostics.initialisation_outcomes</code>, and those of the selected candidate in <a href="../../reference/network/#entlearn.FitDiagnostics.selected_outcome"><code>network_.diagnostics.selected_outcome</code></a>.
+Its <code>train_score</code> is <code>None</code> unless training scores were recorded, so compute the difference only when you set <code>return_train_score=True</code> and a <code>cv</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">outcome</span> <span class="o">=</span> <span class="n">tie_break_model</span><span class="o">.</span><span class="n">network_</span><span class="o">.</span><span class="n">diagnostics</span><span class="o">.</span><span class="n">selected_outcome</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">outcome</span><span class="o">.</span><span class="n">score</span><span class="p">,</span> <span class="n">outcome</span><span class="o">.</span><span class="n">train_score</span><span class="p">)</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">gap</span> <span class="o">=</span> <span class="n">outcome</span><span class="o">.</span><span class="n">score</span> <span class="o">-</span> <span class="n">outcome</span><span class="o">.</span><span class="n">train_score</span>
+</code></pre></div>
+<p>Diagnostic scores are stored as losses: <code>score</code> is the negated mean validation score and <code>train_score</code> the negated mean training score. In this accuracy example, <code>gap</code> is mean training accuracy minus mean validation accuracy. Exact validation-score ties go to the smallest gap.</p>
+<p>Inside an outer search, this selection happens within each outer training fold, and the outer search only sees the selected model.
+To report the gap of each selected candidate, add a scorer that reads it from the fitted estimator:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">def</span><span class="w"> </span><span class="nf">inner_gap</span><span class="p">(</span><span class="n">estimator</span><span class="p">,</span> <span class="n">X</span><span class="p">,</span> <span class="n">y</span><span class="p">):</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>    <span class="n">outcome</span> <span class="o">=</span> <span class="n">estimator</span><span class="o">.</span><span class="n">network_</span><span class="o">.</span><span class="n">diagnostics</span><span class="o">.</span><span class="n">selected_outcome</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    <span class="k">return</span> <span class="n">outcome</span><span class="o">.</span><span class="n">score</span> <span class="o">-</span> <span class="n">outcome</span><span class="o">.</span><span class="n">train_score</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="n">gap_search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">n_inits</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">cv</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">return_train_score</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">),</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>    <span class="p">{</span><span class="s2">&quot;recipe__blocks__input__epsilon&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">]},</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">scoring</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;accuracy&quot;</span><span class="p">:</span> <span class="s2">&quot;accuracy&quot;</span><span class="p">,</span> <span class="s2">&quot;inner_gap&quot;</span><span class="p">:</span> <span class="n">inner_gap</span><span class="p">},</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">refit</span><span class="o">=</span><span class="s2">&quot;accuracy&quot;</span><span class="p">,</span>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="nb">print</span><span class="p">(</span><span class="n">gap_search</span><span class="o">.</span><span class="n">cv_results_</span><span class="p">[</span><span class="s2">&quot;mean_test_inner_gap&quot;</span><span class="p">])</span>
+</code></pre></div>
+<h2 id="supply-initial-states-to-a-search">Supply initial states to a search<a class="headerlink" href="#supply-initial-states-to-a-search" title="Permanent link">&para;</a></h2>
+<p>In an ordinary search, every fit generates its initial geometry from its own training rows, so each fold, and the final refit, starts from different geometry.
+To start every fit from the same geometry, generate the states yourself with <a href="../networks/#initialisation"><code>Network.initialise</code></a> and pass them to the estimator as <code>initial_state</code>.</p>
+<p>To keep one state fixed across the whole search, set it on the estimator, for example <code>EONClassifier(recipe, initial_state=state)</code>.
+To choose the starting geometry as well, add a list of states to the grid as its <code>initial_state</code> axis.
+<code>GridSearchCV</code> crosses this axis with the others, so it selects a state and the parameter settings together:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">entlearn</span><span class="w"> </span><span class="kn">import</span> <span class="n">Network</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">widest</span> <span class="o">=</span> <span class="n">recipe</span><span class="o">.</span><span class="n">replace_block</span><span class="p">(</span><span class="s2">&quot;input&quot;</span><span class="p">,</span> <span class="n">K</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="n">states</span> <span class="o">=</span> <span class="p">[</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">Network</span><span class="o">.</span><span class="n">initialise</span><span class="p">(</span><span class="n">widest</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">X_train</span><span class="p">),</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">y_train</span><span class="p">),</span> <span class="n">seed</span><span class="o">=</span><span class="n">seed</span><span class="p">)</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="k">for</span> <span class="n">seed</span> <span class="ow">in</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="p">]</span>
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="n">grid</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>    <span class="s2">&quot;recipe__blocks__input__K&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span>
+<a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>    <span class="s2">&quot;recipe__blocks__input__epsilon&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.2</span><span class="p">],</span>
+<a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a><span class="p">}</span>
+<a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a><span class="n">state_search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span>
+<a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>    <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">),</span>
+<a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a>    <span class="p">{</span><span class="o">**</span><span class="n">grid</span><span class="p">,</span> <span class="s2">&quot;initial_state&quot;</span><span class="p">:</span> <span class="n">states</span><span class="p">},</span>
+<a id="__codelineno-9-16" name="__codelineno-9-16" href="#__codelineno-9-16"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-9-17" name="__codelineno-9-17" href="#__codelineno-9-17"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-9-18" name="__codelineno-9-18" href="#__codelineno-9-18"></a>    <span class="n">error_score</span><span class="o">=</span><span class="s2">&quot;raise&quot;</span><span class="p">,</span>
+<a id="__codelineno-9-19" name="__codelineno-9-19" href="#__codelineno-9-19"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+<a id="__codelineno-9-20" name="__codelineno-9-20" href="#__codelineno-9-20"></a><span class="n">selected_state</span> <span class="o">=</span> <span class="n">state_search</span><span class="o">.</span><span class="n">best_params_</span><span class="p">[</span><span class="s2">&quot;initial_state&quot;</span><span class="p">]</span>
+</code></pre></div>
+<p>The states are generated for the largest <code>K</code> in the grid. A grid point with a smaller <code>K</code> starts from the first <code>K</code> centroids of its state, which are the centroids the same seed generates for that smaller <code>K</code>.
+The selected model, <code>state_search.best_estimator_</code>, is refitted on all of <code>X_train</code> from <code>selected_state</code>.
+An axis of <span class="arithmatex">\(S\)</span> states multiplies the number of parameter combinations, and so of fold fits, by <span class="arithmatex">\(S\)</span>.</p>
+<div class="admonition warning">
+<p class="admonition-title">Validation rows can influence the states</p>
+<p>These states are generated from all of <code>X_train</code>, including the rows each fold uses for validation.
+To exclude those rows, pass <code>Network.initialise</code> the rows that belong to <em>every</em> training fold as <code>init_rows</code>, and give the search the same folds.
+<code>common_train_rows</code> finds these rows. They exist only for some validation designs: with <code>KFold</code> or <code>StratifiedKFold</code>, every row is used for validation once, so there are none.</p>
+<p>An expanding-window split has a common training set. The next example illustrates this using ordered toy rows. Use <code>TimeSeriesSplit</code> for data whose order calls for forward validation.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.model_selection</span><span class="w"> </span><span class="kn">import</span> <span class="n">TimeSeriesSplit</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">entlearn.scikit_adapter</span><span class="w"> </span><span class="kn">import</span> <span class="n">common_train_rows</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">order</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">argsort</span><span class="p">(</span><span class="n">X_train</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">])</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="n">X_ordered</span><span class="p">,</span> <span class="n">y_ordered</span> <span class="o">=</span> <span class="n">X_train</span><span class="p">[</span><span class="n">order</span><span class="p">],</span> <span class="n">y_train</span><span class="p">[</span><span class="n">order</span><span class="p">]</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="n">folds</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">TimeSeriesSplit</span><span class="p">(</span><span class="n">n_splits</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">X_ordered</span><span class="p">))</span>
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="n">core_rows</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">common_train_rows</span><span class="p">(</span><span class="n">folds</span><span class="p">))</span>
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="n">core_states</span> <span class="o">=</span> <span class="p">[</span>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a>    <span class="n">Network</span><span class="o">.</span><span class="n">initialise</span><span class="p">(</span>
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>        <span class="n">widest</span><span class="p">,</span>
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a>        <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">X_ordered</span><span class="p">),</span>
+<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a>        <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">y_ordered</span><span class="p">),</span>
+<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a>        <span class="n">seed</span><span class="o">=</span><span class="n">seed</span><span class="p">,</span>
+<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>        <span class="n">init_rows</span><span class="o">=</span><span class="n">core_rows</span><span class="p">,</span>
+<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a>    <span class="p">)</span>
+<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a>    <span class="k">for</span> <span class="n">seed</span> <span class="ow">in</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+<a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a><span class="p">]</span>
+<a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a><span class="n">core_search</span> <span class="o">=</span> <span class="n">GridSearchCV</span><span class="p">(</span>
+<a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a>    <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">),</span>
+<a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a>    <span class="p">{</span><span class="o">**</span><span class="n">grid</span><span class="p">,</span> <span class="s2">&quot;initial_state&quot;</span><span class="p">:</span> <span class="n">core_states</span><span class="p">},</span>
+<a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">folds</span><span class="p">,</span>
+<a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-10-23" name="__codelineno-10-23" href="#__codelineno-10-23"></a>    <span class="n">error_score</span><span class="o">=</span><span class="s2">&quot;raise&quot;</span><span class="p">,</span>
+<a id="__codelineno-10-24" name="__codelineno-10-24" href="#__codelineno-10-24"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_ordered</span><span class="p">,</span> <span class="n">y_ordered</span><span class="p">)</span>
+</code></pre></div>
+<p>A state's centroids are in the units of the rows it was generated from.
+If a pipeline fits a scaler inside each fold, as <a href="#gridsearchcv">above</a>, each fold's rows have different units from the state, and nothing detects this.
+With supplied states, scale the data before generating the states and searching, and accept that the validation rows then influence the scaling.</p>
+</div>
+<h3 id="rules-for-a-valid-grid">Rules for a valid grid<a class="headerlink" href="#rules-for-a-valid-grid" title="Permanent link">&para;</a></h3>
+<p>Each grid point is checked when fitted. Violations marked “Raises” fail the fit. Set <code>error_score="raise"</code> to stop the search on these errors. By default, scikit-learn records failed-fit scores as <code>nan</code> when other fits succeed.
+Other violations replace incompatible input geometry with new geometry generated from <code>random_state</code>, as listed below.</p>
+<table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>When a point breaks it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>The estimator has <code>n_inits=1</code></td>
+<td>Raises</td>
+</tr>
+<tr>
+<td>The estimator has <code>init_rows=None</code>; pass <code>init_rows</code> to <code>Network.initialise</code> instead</td>
+<td>Raises</td>
+</tr>
+<tr>
+<td>The state holds input geometry, as every state from <code>Network.initialise</code> does</td>
+<td>New geometry; warns only if the fit uses nothing else from the state</td>
+</tr>
+<tr>
+<td>The input block keeps the name it had when the state was generated</td>
+<td>Warns, then new geometry</td>
+</tr>
+<tr>
+<td>The input block keeps its kind, <code>Input</code> or <code>ManifoldInput</code></td>
+<td>Warns, then new geometry</td>
+</tr>
+<tr>
+<td>The input block keeps its initialisation settings, <code>centroid_strategy</code>, <code>greedy_candidates</code>, <code>balanced</code> and <code>W_std</code>, and, for a <code>ManifoldInput</code>, its <code>subspace_dimension</code></td>
+<td>Warns, then new geometry</td>
+</tr>
+<tr>
+<td><code>K</code> is at most the <code>K</code> of the state, with the conditions below</td>
+<td>Warns, then new geometry</td>
+</tr>
+<tr>
+<td>The features keep the layout of the rows that generated the state, so <code>categorical_features</code> stays fixed</td>
+<td>Warns, then new geometry, if the widths differ</td>
+</tr>
+</tbody>
+</table>
+<p>The warning names the block and the broken rule.
+To stop the search on it as well, turn it into an error with <code>warnings.filterwarnings("error", message="InitialState")</code> before fitting the search.</p>
+<p>A point may change the fitting temperatures: <code>epsilon</code>, <code>epsilon_D</code>, <code>epsilon_T</code> and <code>delta_cat</code> of an <code>Input</code>, and <code>epsilon</code>, <code>epsilon_T</code> and <code>alpha</code> of a <code>ManifoldInput</code>.
+It may also change the hidden blocks, the connections and the head, since a state from <code>Network.initialise</code> holds only the input geometry and the seeds of the connections.
+If a grid point removes or renames a seeded connection, the fit names it in a warning and ignores its seed. The input still starts from the state’s geometry.
+The estimator converts the state to its own <code>dtype</code> and <code>device</code>.
+With a supplied state, the estimator does not select an initialisation, so leave its <code>cv</code> and <code>scoring</code> at their defaults.</p>
+<p>The <code>K</code> of a point has further conditions:</p>
+<ul>
+<li>The state must be generated by standard k-means++, or by greedy k-means++ with a fixed <code>greedy_candidates</code>, without balanced selection. Balanced selection and the default number of greedy candidates depend on <code>K</code>, so they need the state's own <code>K</code>.</li>
+<li>A state captured from a fitted network, with <code>Network.capture_current_state</code>, holds learned geometry. A point must then use exactly the number of centroids it holds, <code>input_geometry.K_active</code>, but may change its initialisation settings, <code>centroid_strategy</code>, <code>greedy_candidates</code>, <code>balanced</code> and <code>W_std</code>. Its name, its kind and, for a <code>ManifoldInput</code>, its <code>subspace_dimension</code> must still match.</li>
+<li><code>Network.initialise</code> caps <code>K</code> at the number of eligible rows, and warns. The eligible rows are those in <code>init_rows</code>, or all the rows without it; balanced selection counts only the labelled ones. A point whose <code>K</code> exceeds the capped count warns and fits only the centroids the state holds, so generate the states from enough rows for the largest <code>K</code>.</li>
+</ul>
+<p>With categorical columns, pass <code>Network.initialise</code> the codes the estimator uses, which number each column's levels in sorted order.
+Every training fold must also contain every level of every categorical column: the estimator learns the levels from the rows it fits, so a fold that lacks one numbers the others differently from the state.</p>
+<h2 id="select-an-initialisation-with-a-network">Select an initialisation with a Network<a class="headerlink" href="#select-an-initialisation-with-a-network" title="Permanent link">&para;</a></h2>
+<p>The estimators' <code>scoring</code> and <code>cv</code> parameters are built on selection controls of <code>Network.fit</code>, which you can also use directly with tensors.
+By default, <code>Network.fit(..., n_inits=3)</code> keeps the candidate with the lowest final training objective (see <a href="../networks/#initialisation">Networks</a>).</p>
+<h3 id="select-by-a-prediction-loss">Select by a prediction loss<a class="headerlink" href="#select-by-a-prediction-loss" title="Permanent link">&para;</a></h3>
+<p>To select by a metric computed on the predictions instead, pass a function as <code>selection_loss</code>.
+It should return one number, where <strong>smaller values are better</strong>.
+For example, a sample-weighted Brier loss:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">entlearn</span><span class="w"> </span><span class="kn">import</span> <span class="n">Network</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="n">X_fit</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">X_train</span><span class="p">)</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="n">y_fit</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">y_train</span><span class="p">)</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="k">def</span><span class="w"> </span><span class="nf">brier_loss</span><span class="p">(</span><span class="n">prediction</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">sample_weights</span><span class="p">,</span> <span class="o">**</span><span class="n">context</span><span class="p">):</span>
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>    <span class="n">row_loss</span> <span class="o">=</span> <span class="p">((</span><span class="n">prediction</span> <span class="o">-</span> <span class="n">target</span><span class="p">)</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>    <span class="k">if</span> <span class="n">sample_weights</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>        <span class="k">return</span> <span class="n">row_loss</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a>    <span class="k">return</span> <span class="p">(</span><span class="n">row_loss</span> <span class="o">*</span> <span class="n">sample_weights</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span> <span class="o">/</span> <span class="n">sample_weights</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+<a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a>
+<a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a>
+<a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a><span class="n">brier_network</span> <span class="o">=</span> <span class="n">Network</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a>    <span class="n">recipe</span><span class="p">,</span> <span class="n">X_fit</span><span class="p">,</span> <span class="n">y_fit</span><span class="p">,</span> <span class="n">n_inits</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">selection_loss</span><span class="o">=</span><span class="n">brier_loss</span>
+<a id="__codelineno-11-17" name="__codelineno-11-17" href="#__codelineno-11-17"></a><span class="p">)</span>
+</code></pre></div>
+<p>The function receives the predictions and targets of the labelled rows: class probabilities and class distributions for classification, or two-dimensional values for regression.
+It also receives the keyword arguments <code>sample_weights</code>, <code>class_weights</code> and <code>task_weights</code>, each <code>None</code> when you did not supply those weights, and <code>fold</code> and <code>partition</code>, described below.
+The callback receives the supplied weights and decides how to combine and normalise them for its metric.</p>
+<p>Here the candidates are still compared on the rows they were fitted on, with <code>fold=None</code> and <code>partition="training"</code>, so a lower loss is not evidence of better performance on new data.</p>
+<h3 id="select-with-validation-folds">Select with validation folds<a class="headerlink" href="#select-with-validation-folds" title="Permanent link">&para;</a></h3>
+<p>To compare candidates on held-out rows, also pass <code>validation_pairs</code>: a list of <code>(training_rows, validation_rows)</code> pairs of <code>torch.int64</code> index tensors.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">rows</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">X_fit</span><span class="p">))</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="n">pairs</span> <span class="o">=</span> <span class="p">[(</span><span class="n">rows</span><span class="p">[:</span><span class="mi">50</span><span class="p">],</span> <span class="n">rows</span><span class="p">[</span><span class="mi">50</span><span class="p">:]),</span> <span class="p">(</span><span class="n">rows</span><span class="p">[</span><span class="mi">25</span><span class="p">:],</span> <span class="n">rows</span><span class="p">[:</span><span class="mi">25</span><span class="p">])]</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">validated_network</span> <span class="o">=</span> <span class="n">Network</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">recipe</span><span class="p">,</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">X_fit</span><span class="p">,</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="n">y_fit</span><span class="p">,</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>    <span class="n">n_inits</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>    <span class="n">seed</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span>
+<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a>    <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+<a id="__codelineno-12-10" name="__codelineno-12-10" href="#__codelineno-12-10"></a>    <span class="n">selection_loss</span><span class="o">=</span><span class="n">brier_loss</span><span class="p">,</span>
+<a id="__codelineno-12-11" name="__codelineno-12-11" href="#__codelineno-12-11"></a>    <span class="n">validation_pairs</span><span class="o">=</span><span class="n">pairs</span><span class="p">,</span>
+<a id="__codelineno-12-12" name="__codelineno-12-12" href="#__codelineno-12-12"></a><span class="p">)</span>
+</code></pre></div>
+<p>Each candidate starts from one initial state, and is fitted separately on the training rows of every pair from that same state.
+Each fold model is scored on single-pass predictions for its validation rows, with <code>partition="validation"</code> and <code>fold</code> set to the pair, and the candidate with the lowest mean validation loss wins.
+Every fold has equal influence, regardless of its size. The winning candidate is then fitted once more on all the rows, starting from its initial state.</p>
+<p>Both sides of a pair must be non-empty, without repeated indices, and must not share rows. Each side needs labelled rows with positive weight.
+The folds may overlap each other, and they do not need to cover every row.
+<code>validation_pairs</code> requires <code>selection_loss</code>, and is ignored when you supply an <code>initial_state</code>.</p>
+<p>With <code>return_train_score=True</code>, each fold model is also scored on its training rows, with <code>partition="training"</code>, and the mean is recorded as the <code>train_score</code> of each outcome in <code>network.diagnostics.initialisation_outcomes</code>.
+Exact ties in the mean validation loss then go to the smallest <code>score - train_score</code>, the validation loss minus the training loss, as described in <a href="#break-ties-with-training-scores">Break ties with training scores</a>.</p>
+<div class="admonition warning">
+<p class="admonition-title">Validation rows can still influence the initialisation</p>
+<p>As with <a href="#supply-initial-states-to-a-search">supplied states</a>, restrict initialisation to rows shared by every training partition. Pass their indices as <code>init_rows</code>. The caller is responsible for excluding validation rows.
+Use <code>common_train_rows</code> to find the shared rows:
+It takes the pairs, as CPU tensors or NumPy arrays, and returns a NumPy array, which <code>Network.fit</code> needs as a tensor on the device of the data:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">entlearn.scikit_adapter</span><span class="w"> </span><span class="kn">import</span> <span class="n">common_train_rows</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="n">init_rows</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">as_tensor</span><span class="p">(</span><span class="n">common_train_rows</span><span class="p">(</span><span class="n">pairs</span><span class="p">),</span> <span class="n">device</span><span class="o">=</span><span class="n">X_fit</span><span class="o">.</span><span class="n">device</span><span class="p">)</span>
+</code></pre></div>
+<p>Pass the result as <code>init_rows</code> together with <code>validation_pairs</code>. If the training partitions share no rows, the result is empty and <code>Network.fit</code> rejects it.
+An estimator also accepts <code>common_train_rows</code> itself as its <code>init_rows</code>, as described <a href="#select-an-initialisation-for-one-recipe">above</a>.</p>
+<p>The validation labels also select the winner, so the validation score is not a final test score.</p>
+</div>
+<p>For <span class="arithmatex">\(I\)</span> candidates and <span class="arithmatex">\(F\)</span> folds, selection performs <span class="arithmatex">\(IF + 1\)</span> fits, or <span class="arithmatex">\(IF + I\)</span> with <code>retain="members"</code>, since each retained member is fitted on all the rows.</p>
+<h3 id="parallel-initialisations">Parallel initialisations<a class="headerlink" href="#parallel-initialisations" title="Permanent link">&para;</a></h3>
+<p>By default, candidates are fitted one after the other.
+Set <code>n_jobs</code> to fit several at the same time, for example <code>n_jobs=-1</code> to use all available CPUs. This requires <code>joblib</code>, installed by the <code>sklearn</code> extra.
+<code>parallel_backend</code> chooses between <code>"threads"</code> (the default) and <code>"processes"</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">parallel_network</span> <span class="o">=</span> <span class="n">Network</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>    <span class="n">recipe</span><span class="p">,</span> <span class="n">X_fit</span><span class="p">,</span> <span class="n">y_fit</span><span class="p">,</span> <span class="n">n_inits</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">n_jobs</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">parallel_backend</span><span class="o">=</span><span class="s2">&quot;threads&quot;</span>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="p">)</span>
+</code></pre></div>
+<p>Threads share the data. Processes copy it to each worker, and require the <code>selection_loss</code> and any other function you pass to be picklable, so define them at module level rather than inside another function.
+A process request made from inside a worker or a non-main thread emits a warning and uses threads instead.
+With either backend, warnings raised inside a candidate reach your code once every candidate has finished, as described in <a href="../troubleshooting/#warnings">Troubleshooting</a>.
+The estimators accept the same <code>n_jobs</code> and <code>parallel_backend</code> parameters.</p>
+<p>The seeds of all the candidates are drawn before any is fitted, so the selected candidate does not depend on <code>n_jobs</code>, the backend or the order in which workers finish.
+Each candidate's record in <a href="../../reference/network/#entlearn.FitDiagnostics"><code>network.diagnostics.initialisation_outcomes</code></a> holds the requested and the actual backend, as <code>requested_backend</code> and <code>effective_backend</code>.</p>
+<h2 id="optional-optuna-backend">Optional Optuna backend<a class="headerlink" href="#optional-optuna-backend" title="Permanent link">&para;</a></h2>
+<p>Optuna's <code>OptunaSearchCV</code> samples parameter combinations within a fixed trial budget.
+Install its optional dependencies separately:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>pip<span class="w"> </span>install<span class="w"> </span>optuna<span class="w"> </span><span class="s2">&quot;optuna-integration[sklearn]&quot;</span>
+</code></pre></div>
+<p>Parameters can be sampled from a continuous range using <code>FloatDistribution</code>, or from a list of choices using <code>CategoricalDistribution</code>.
+For example, we can vary the temperature between 0.05 and 0.5, and choose the number of clusters from <code>[2, 4, 8]</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">optuna.distributions</span><span class="w"> </span><span class="kn">import</span> <span class="n">CategoricalDistribution</span><span class="p">,</span> <span class="n">FloatDistribution</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">optuna_integration</span><span class="w"> </span><span class="kn">import</span> <span class="n">OptunaSearchCV</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="n">optuna_search</span> <span class="o">=</span> <span class="n">OptunaSearchCV</span><span class="p">(</span>
+<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>    <span class="n">EONClassifier</span><span class="p">(</span><span class="n">recipe</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">7</span><span class="p">,</span> <span class="n">max_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">),</span>
+<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>    <span class="n">param_distributions</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>        <span class="s2">&quot;recipe__blocks__input__epsilon&quot;</span><span class="p">:</span> <span class="n">FloatDistribution</span><span class="p">(</span><span class="mf">0.05</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="n">log</span><span class="o">=</span><span class="kc">True</span><span class="p">),</span>
+<a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>        <span class="s2">&quot;recipe__blocks__input__K&quot;</span><span class="p">:</span> <span class="n">CategoricalDistribution</span><span class="p">([</span><span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">]),</span>
+<a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a>    <span class="p">},</span>
+<a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a>    <span class="n">n_trials</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+<a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a>    <span class="n">random_state</span><span class="o">=</span><span class="mi">13</span><span class="p">,</span>
+<a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a>    <span class="n">cv</span><span class="o">=</span><span class="n">StratifiedKFold</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">11</span><span class="p">),</span>
+<a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a>    <span class="n">scoring</span><span class="o">=</span><span class="s2">&quot;neg_log_loss&quot;</span><span class="p">,</span>
+<a id="__codelineno-16-14" name="__codelineno-16-14" href="#__codelineno-16-14"></a>    <span class="n">error_score</span><span class="o">=</span><span class="s2">&quot;raise&quot;</span><span class="p">,</span>
+<a id="__codelineno-16-15" name="__codelineno-16-15" href="#__codelineno-16-15"></a><span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+<a id="__codelineno-16-16" name="__codelineno-16-16" href="#__codelineno-16-16"></a>
+<a id="__codelineno-16-17" name="__codelineno-16-17" href="#__codelineno-16-17"></a><span class="n">selected_model</span> <span class="o">=</span> <span class="n">optuna_search</span><span class="o">.</span><span class="n">best_estimator_</span>
+</code></pre></div>
+<p>Here, <code>log=True</code> samples the temperature on a logarithmic scale.
+You can inspect <code>best_params_</code> and <code>best_score_</code>, and use the selected model as in the grid search above.
+See the <a href="https://optuna-integration.readthedocs.io/en/stable/reference/generated/optuna_integration.OptunaSearchCV.html">OptunaSearchCV reference</a> for its search options.</p>
+<p><a href="../../tutorials/series/#tutorial-4">Tutorial 4</a> provides a visual walkthrough of parameter search.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "content.code.copy", "search.suggest", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16/dist/plot.umd.min.js"></script>
+      
+        <script src="../../javascripts/figures.js"></script>
+      
+    
+  </body>
+</html>

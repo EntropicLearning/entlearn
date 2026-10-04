@@ -1,0 +1,2259 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Tensor-native entropic-learning primitives for PyTorch.">
+      
+      
+      
+        <link rel="canonical" href="https://entropiclearning.github.io/entlearn/0.1.0/concepts/learning/">
+      
+      
+        <link rel="prev" href="../loss/">
+      
+      
+        <link rel="next" href="../prediction/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Learning the model - Entlearn</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CSpace+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Space Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/figures.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/typography.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-orange" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#learning-the-model" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Entlearn" class="md-header__button md-logo" aria-label="Entlearn" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Entlearn
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Learning the model
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-orange" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-orange" data-md-color-accent="deep-orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/EntropicLearning/entlearn" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    EntropicLearning/entlearn
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guide/introduction/" class="md-tabs__link">
+          
+  
+  
+  Guide
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Concepts
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  API
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Entlearn" class="md-nav__button md-logo" aria-label="Entlearn" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Entlearn
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/EntropicLearning/entlearn" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    EntropicLearning/entlearn
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/introduction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Introduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/suitability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Suitability and scaling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/package/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Package and Recipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/networks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Networks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/estimators/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Estimators
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/hyperparameters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperparameters
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/manifold/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifold
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../representation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Representing observations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../loss/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The objective
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Learning the model
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Learning the model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#affiliation-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Affiliation updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Affiliation updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#assignment-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Assignment costs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#affiliation-temperatures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Affiliation temperatures
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transition-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transition updates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#centroid-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Centroid updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Centroid updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#manifold-bases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manifold bases
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#weight-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Weight updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Weight updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#feature-weights" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature weights
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-weights" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance weights
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-weights" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output weights
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#temperatures-and-effective-dimension" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Temperatures and effective dimension
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#head-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Head updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Head updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#classification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Classification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#regression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Regression
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initialisation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Initialisation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#input-geometry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input geometry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hidden-transitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hidden transitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#heads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Heads
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pruning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pruning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#convergence-and-stopping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Convergence and stopping
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prediction/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Predicting new observations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Notation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../glossary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Glossary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorial series
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/recipe/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recipe
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/network/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Network
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/helpers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optional helpers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/scikit_adapter/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scikit-learn
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/primitives/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Primitives
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#affiliation-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Affiliation updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Affiliation updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#assignment-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Assignment costs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#affiliation-temperatures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Affiliation temperatures
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transition-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transition updates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#centroid-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Centroid updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Centroid updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#manifold-bases" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manifold bases
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#weight-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Weight updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Weight updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#feature-weights" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature weights
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#instance-weights" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instance weights
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-weights" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output weights
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#temperatures-and-effective-dimension" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Temperatures and effective dimension
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#head-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Head updates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Head updates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#classification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Classification
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#regression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Regression
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#initialisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Initialisation
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Initialisation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#input-geometry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Input geometry
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hidden-transitions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hidden transitions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#heads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Heads
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pruning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pruning
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#convergence-and-stopping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Convergence and stopping
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="learning-the-model">Learning the model<a class="headerlink" href="#learning-the-model" title="Permanent link">&para;</a></h1>
+<p>Fitting uses block-coordinate descent on <a href="../loss/">the objective function</a>.
+Each update sets one group of parameters to its minimiser while the other groups remain fixed. Affiliations and weights solve linear costs with entropy rewards, transitions normalise weighted counts, and centroids solve weighted least-squares problems.</p>
+<p>One complete iteration proceeds from the head back to the input:</p>
+<ol>
+<li>Update the head's transition matrix, or its output centroids followed by any learned output weights.</li>
+<li>Visit hidden blocks from last to first. Update each block's affiliations, prune empty clusters, then update its incoming transition.</li>
+<li>Update the input affiliations and prune. Update any learned instance weights. A standard input then updates any learned feature weights and its centroids. A manifold input updates its centroids and plane bases.</li>
+</ol>
+<p>Parameters held fixed have no update step.
+The following sections derive the updates, then describe initialisation, pruning and stopping.
+Symbols and shapes are listed in <a href="../notation/">Notation</a>.</p>
+<h2 id="affiliation-updates">Affiliation updates<a class="headerlink" href="#affiliation-updates" title="Permanent link">&para;</a></h2>
+<p>For observation <span class="arithmatex">\(t\)</span> in block <span class="arithmatex">\(n\)</span>, collect all non-entropy terms involving its row into assignment costs <span class="arithmatex">\(u_{tk}^{(n)}\)</span>. The row's objective is</p>
+<div class="arithmatex">\[
+\sum_k\Gamma_{tk}^{(n)}u_{tk}^{(n)}-\varepsilon_nw_tH(\gamma_t^{(n)}).
+\]</div>
+<p>For positive row temperature <span class="arithmatex">\(\tau_t=\varepsilon_nw_t\)</span>, its minimiser is</p>
+<div class="arithmatex">\[
+\Gamma_{tk}^{(n)}=\frac{\exp(-u_{tk}^{(n)}/\tau_t)}{\sum_{k'}\exp(-u_{tk'}^{(n)}/\tau_t)}.
+\]</div>
+<p>At zero temperature, the update assigns the observation to a minimum-cost cluster, breaking ties by the lowest index.
+Each row is updated independently using the current neighbouring affiliations.
+Because the iteration proceeds backwards, outgoing costs read the next block's affiliations from the same iteration.</p>
+<h3 id="assignment-costs">Assignment costs<a class="headerlink" href="#assignment-costs" title="Permanent link">&para;</a></h3>
+<p>An input cost combines discretisation error with the outgoing connection. A hidden cost combines incoming and outgoing connections. The final block uses the supervised head term as its outgoing cost.</p>
+<details class="note">
+<summary>Assignment costs for each block</summary>
+<p>For an input block followed by a hidden block,</p>
+<div class="arithmatex">\[
+u_{tk}^{(0)}=W_T[t]d_{tk}-\delta_1w_t\sum_{k'}\Gamma_{tk'}^{(1)}\log\Theta^{(1)}[k',k].
+\]</div>
+<p>For a hidden block with hidden neighbours,</p>
+<div class="arithmatex">\[
+u_{tk}^{(n)}=-\delta_nw_t\sum_{k'}\Gamma_{tk'}^{(n-1)}\log\Theta^{(n)}[k,k']
+-\delta_{n+1}w_t\sum_{k'}\Gamma_{tk'}^{(n+1)}\log\Theta^{(n+1)}[k',k].
+\]</div>
+<p>The incoming term favours clusters compatible with the source affiliations. The outgoing term favours clusters compatible with the next block's affiliations.</p>
+<p>For the final clustering block, replace the outgoing coupling by the head cost:</p>
+<div class="arithmatex">\[
+h_t^{\mathrm{cls}}[k]=-\delta_{N+1}\sum_mQ_{tm}\log\Theta_{\mathrm{out}}[m,k],
+\qquad h_t^{\mathrm{reg}}[k]=\delta_{N+1}\omega_t r_t[k].
+\]</div>
+<p><span class="arithmatex">\(Q\)</span> and <span class="arithmatex">\(\omega\)</span> are the <a href="../loss/#observation-weighting">supervised weights</a>. Unlabelled observations have zero head cost. With no hidden blocks, the input cost is <span class="arithmatex">\(W_T[t]d_{tk}+h_t[k]\)</span>.</p>
+</details>
+<h3 id="affiliation-temperatures">Affiliation temperatures<a class="headerlink" href="#affiliation-temperatures" title="Permanent link">&para;</a></h3>
+<p>Block <code>epsilon</code> sets <span class="arithmatex">\(\varepsilon_n\)</span>. The default is zero, leading to hard affiliations.
+Finite positive values give soft affiliations, while larger values spread membership more broadly.
+Infinite affiliation temperatures are rejected.</p>
+<div class="admonition note">
+<p class="admonition-title">The temperature setting determines the regime</p>
+<p>The hard or soft regime is resolved once at the start of fitting, by comparing <span class="arithmatex">\(\varepsilon_n\)</span> with dtype machine precision. The comparison uses the block setting, even though the row temperature is <span class="arithmatex">\(\tau_t=\varepsilon_nw_t\)</span>. With uniform weights, <span class="arithmatex">\(\tau_t=\varepsilon_n/T\)</span> and the common <span class="arithmatex">\(1/T\)</span> factor in the weighted costs cancels from the exponent. Increasing the number of rows therefore does not change the regime, which is kept during prediction. <code>network.inspect("affiliation_regimes")</code> reports <code>"hard"</code> or <code>"soft"</code> for each block.</p>
+</div>
+<p>Temperature effects depend on the feature scale and connection strengths.
+The <a href="../../guide/model_selection/">Model selection guide</a> describes how to search over them.</p>
+<h2 id="transition-updates">Transition updates<a class="headerlink" href="#transition-updates" title="Permanent link">&para;</a></h2>
+<p>For hidden connection <span class="arithmatex">\(n\)</span>, form the weighted co-occurrence counts</p>
+<div class="arithmatex">\[
+A_{kk'}=\sum_tw_t\Gamma_{tk}^{(n)}\Gamma_{tk'}^{(n-1)}+a_n.
+\]</div>
+<p>Normalise columns under M coupling and rows under S coupling:</p>
+<div class="arithmatex">\[
+\Theta^{(n)}[k,k']=\frac{A_{kk'}}{\sum_jA_{jk'}}\quad\text{under M},
+\qquad
+\Theta^{(n)}[k,k']=\frac{A_{kk'}}{\sum_jA_{kj}}\quad\text{under S}.
+\]</div>
+<p>The coupling objective separates into one count-weighted cross-entropy per constrained slice.
+Its minimiser is the normalised count vector.
+The <a href="../loss/#coupling-terms">prior coefficient</a> <span class="arithmatex">\(a_n\)</span> acts as an equal pseudocount in each entry.
+Positive pseudocounts keep entries positive.</p>
+<p>A slice with zero total count becomes uniform: <span class="arithmatex">\(1/K_n\)</span> for an M column or <span class="arithmatex">\(1/K_{n-1}\)</span> for an S row.</p>
+<h2 id="centroid-updates">Centroid updates<a class="headerlink" href="#centroid-updates" title="Permanent link">&para;</a></h2>
+<p>For an input cluster, define its weighted mass</p>
+<div class="arithmatex">\[
+m_k=\sum_tW_T[t]\Gamma_{tk}^{(0)}.
+\]</div>
+<p>The continuous centroid is the weighted mean</p>
+<div class="arithmatex">\[
+c_k=\frac{\sum_tW_T[t]\Gamma_{tk}^{(0)}x_t}{m_k}.
+\]</div>
+<p>Each categorical centroid is the weighted level distribution</p>
+<div class="arithmatex">\[
+C_{j,k,:}^{\mathrm{cat}}=\frac{\sum_tW_T[t]\Gamma_{tk}^{(0)}X_{j,t,:}^{\mathrm{cat}}}{m_k}.
+\]</div>
+<p>Feature weights multiply each feature's objective by a constant and leave these means as minimisers.
+The updates use instance weights from the same iteration.</p>
+<div class="admonition note">
+<p class="admonition-title">Weighted mass and empty clusters</p>
+<p>When <span class="arithmatex">\(m_k\)</span> is at or below dtype machine precision, continuous centroids become zero and categorical centroids become uniform. This weighted-mass fallback is distinct from <a href="#pruning">pruning</a>, which uses unweighted affiliation mass.</p>
+</div>
+<h3 id="manifold-bases">Manifold bases<a class="headerlink" href="#manifold-bases" title="Permanent link">&para;</a></h3>
+<p>After updating manifold centroids, fit each local plane using the leading eigenvectors of its cluster’s weighted covariance.</p>
+<details class="note">
+<summary>Covariance and basis update</summary>
+<p>A manifold input uses the same centroid mean. After updating the centroid, compute</p>
+<div class="arithmatex">\[
+\Sigma_k=\frac{1}{m_k}\sum_tW_T[t]\Gamma_{tk}^{(0)}(x_t-c_k)(x_t-c_k)^\top.
+\]</div>
+<p><span class="arithmatex">\(U_k\)</span> becomes the leading <code>subspace_dimension</code> eigenvectors of this weighted covariance. These directions maximise captured covariance and minimise the weighted squared distance from the plane. A cluster with no mass keeps its previous basis.</p>
+</details>
+<h2 id="weight-updates">Weight updates<a class="headerlink" href="#weight-updates" title="Permanent link">&para;</a></h2>
+<p>For any learned weight vector <span class="arithmatex">\(W\)</span>, collect its linear coefficients in a cost vector <span class="arithmatex">\(b\)</span>.
+Its objective is <span class="arithmatex">\(\sum_iW[i]b_i-\varepsilon H(W)\)</span>, with minimiser:</p>
+<div class="arithmatex">\[
+W[i]=\frac{\exp(-b_i/\varepsilon)}{\sum_j\exp(-b_j/\varepsilon)}.
+\]</div>
+<h3 id="feature-weights">Feature weights<a class="headerlink" href="#feature-weights" title="Permanent link">&para;</a></h3>
+<p>For continuous feature <span class="arithmatex">\(d\)</span> and categorical feature <span class="arithmatex">\(j\)</span>,</p>
+<div class="arithmatex">\[
+\begin{aligned}
+b_d^{(D)}&amp;=\sum_{t,k}W_T[t]\Gamma_{tk}^{(0)}(X_{td}-C_{kd})^2,\\
+b_{D_{\mathrm{cont}}+j}^{(D)}&amp;=\delta_{\mathrm{cat}}s_j\sum_{t,k}W_T[t]\Gamma_{tk}^{(0)}
+\mathrm{CE}(X_{j,t,:}^{\mathrm{cat}},C_{j,k,:}^{\mathrm{cat}}).
+\end{aligned}
+\]</div>
+<p>Both feature types share one softmax.
+Its entries are total within-cluster errors, with the <a href="../representation/#the-discretisation-error">categorical scaling</a> applied before the update.
+At infinite <code>epsilon_D</code>, feature weights retain their starting values: uniform, a random draw controlled by <code>W_std</code>, or supplied weights.
+A hard update selects a single feature.</p>
+<h3 id="instance-weights">Instance weights<a class="headerlink" href="#instance-weights" title="Permanent link">&para;</a></h3>
+<p>The cost of observation <span class="arithmatex">\(t\)</span> is its affiliation-weighted input error:</p>
+<div class="arithmatex">\[
+b_t^{(T)}=\sum_k\Gamma_{tk}^{(0)}d_{tk}.
+\]</div>
+<p>For a manifold input, use <span class="arithmatex">\(g_k(x_t)\)</span> in place of <span class="arithmatex">\(d_{tk}\)</span>.
+Observations with larger errors receive less weight in the soft update.
+At infinite <code>epsilon_T</code>, weights stay at the normalised sample weights.
+With finite temperature these starting values can change, and sample weights continue to act separately on the other terms.</p>
+<h3 id="output-weights">Output weights<a class="headerlink" href="#output-weights" title="Permanent link">&para;</a></h3>
+<p>For regression output dimension <span class="arithmatex">\(m\)</span>,</p>
+<div class="arithmatex">\[
+b_m^{(M)}=\delta_{N+1}\sum_t\omega_t\sum_k\Gamma_{tk}^{(N)}(Y_{tm}-C_y[m,k])^2.
+\]</div>
+<p>The update follows the output-centroid update.
+At infinite <code>epsilon_M</code>, output weights are uniform unless supplied as a <code>W_M</code> tuple, which is normalised to sum to one.
+Supplied output weights require infinite <code>epsilon_M</code>.</p>
+<h3 id="temperatures-and-effective-dimension">Temperatures and effective dimension<a class="headerlink" href="#temperatures-and-effective-dimension" title="Permanent link">&para;</a></h3>
+<p>Weight temperatures are infinite by default, which holds their values fixed. 
+A finite temperature above dtype machine precision enables the softmax update once per iteration. 
+A temperature at or below machine precision selects the cheapest entry, with ties going to the lowest index. 
+Fixed weights and zero-temperature weights contribute no entropy term to the reported loss.</p>
+<p>A temperature is measured in the units of its cost vector. 
+Note that the same value can yield broad weights on one dataset and concentrated weights on another. 
+The normalised effective dimension <span class="arithmatex">\(\exp(H(p))/n\)</span> summarises concentration for a probability vector with <span class="arithmatex">\(n\)</span> entries. 
+It is one for uniform weights and <span class="arithmatex">\(1/n\)</span> for a single selected entry. The unnormalised effective dimension is <span class="arithmatex">\(\exp(H(p))\)</span>.</p>
+<p>The <a href="../../reference/helpers/#fitted-reporting">reporting helper</a> <code>effective_dimensions</code> reports normalised effective dimensions for affiliations and weights. For cost vectors whose entries follow comparable distributions, a given temperature can yield similar normalised effective dimensions at different vector lengths.</p>
+<h2 id="head-updates">Head updates<a class="headerlink" href="#head-updates" title="Permanent link">&para;</a></h2>
+<h3 id="classification">Classification<a class="headerlink" href="#classification" title="Permanent link">&para;</a></h3>
+<p>Form the labelled co-occurrence counts</p>
+<div class="arithmatex">\[
+\nu_{mk}=\sum_tQ_{tm}\Gamma_{tk}^{(N)}.
+\]</div>
+<p>Normalise columns for an M head and rows for an S head, as for hidden transitions. 
+Under M, a cluster with no labelled mass gets a uniform class distribution <span class="arithmatex">\(1/M\)</span>. 
+Under S, a class with no labelled mass gets a uniform row <span class="arithmatex">\(1/K_N\)</span>, while an unlabelled cluster contributes a column of zeros.</p>
+<h3 id="regression">Regression<a class="headerlink" href="#regression" title="Permanent link">&para;</a></h3>
+<p>For each cluster and output dimension, the weighted target mean minimises the squared residual:</p>
+<div class="arithmatex">\[
+C_y[m,k]=\frac{\sum_t\omega_t\Gamma_{tk}^{(N)}Y_{tm}}{\sum_t\omega_t\Gamma_{tk}^{(N)}}.
+\]</div>
+<p><span class="arithmatex">\(W_M[m]\)</span> scales the dimension's objective and leaves this mean as a minimiser. If the cluster has no labelled mass, use the overall labelled target mean <span class="arithmatex">\(\sum_t\omega_tY_{tm}/\sum_t\omega_t\)</span>.</p>
+<h2 id="initialisation">Initialisation<a class="headerlink" href="#initialisation" title="Permanent link">&para;</a></h2>
+<p>Different starting states can lead to different solutions. 
+<code>n_inits</code> compares fits from several initialisations and retains the best. 
+The <a href="../../guide/networks/#initialisation">Initialisation guide</a> explains the controls and parameter reuse.</p>
+<h3 id="input-geometry">Input geometry<a class="headerlink" href="#input-geometry" title="Permanent link">&para;</a></h3>
+<details class="note">
+<summary>Input seeding procedure</summary>
+<p>Feature weights start at <span class="arithmatex">\(1/D\)</span> unless supplied or randomised with positive <code>W_std</code>. Randomisation draws independent normal logits with mean zero and standard deviation <code>W_std</code>, then applies softmax. Small <code>W_std</code> gives near-uniform weights and large values tend to concentrate them.</p>
+<p>Centroids start at <span class="arithmatex">\(K_0\)</span> distinct observations selected by weighted k-means++ using both feature types and the starting feature weights. Categorical seeds are initially one-hot. Before the first iteration, categorical centroids are replaced by their weighted-frequency update using the first affiliations and starting instance weights. Continuous seeds retain their values.</p>
+</details>
+<h3 id="hidden-transitions">Hidden transitions<a class="headerlink" href="#hidden-transitions" title="Permanent link">&para;</a></h3>
+<details class="note">
+<summary>Transition seeding procedure</summary>
+<p>Connections are seeded in order from the input using the fit's random seed. After each transition is seeded, its target affiliations are assigned using the forward prediction rule.</p>
+<ul>
+<li><strong>M with no more target than source clusters:</strong> group source clusters into <span class="arithmatex">\(K_n\)</span> groups using k-means++ over their feature-space centroids, weighted by cluster masses. Each source column assigns all its mass to its group.</li>
+<li><strong>M with more target than source clusters:</strong> select <span class="arithmatex">\(K_n\)</span> observations by k-means++ over source affiliations using cross-entropy dissimilarity. Assign observations to their nearest selection, then compute the transition from this hard partition.</li>
+<li><strong>S:</strong> select observations by the same affiliation procedure and use their source affiliations as transition rows.</li>
+</ul>
+<p>An active pseudocount is incorporated into seeded counts before normalisation. A transition supplied from a fitted network retains its values.</p>
+</details>
+<h3 id="heads">Heads<a class="headerlink" href="#heads" title="Permanent link">&para;</a></h3>
+<p>Classification heads start with the uniform matrix under their selected constraint. Regression output centroids start with the overall weighted mean of labelled targets in every column.</p>
+<h2 id="pruning">Pruning<a class="headerlink" href="#pruning" title="Permanent link">&para;</a></h2>
+<p>Immediately after each affiliation update, fitting checks cluster <span class="arithmatex">\(k\)</span>'s unweighted mass <span class="arithmatex">\(\sum_t\Gamma_{tk}^{(n)}\)</span> (without applying sample and instance weights).
+A mass at or below dtype machine precision is empty. </p>
+<p>Removal drops the affiliation column and associated input geometry or head-parameter columns. An incoming hidden transition loses target rows, and an outgoing transition loses source columns. Renormalisation depends on the coupling.</p>
+<h2 id="convergence-and-stopping">Convergence and stopping<a class="headerlink" href="#convergence-and-stopping" title="Permanent link">&para;</a></h2>
+<p>Every coordinate update minimises its part of the same objective, so an iteration can only decrease or preserve the loss up to numerical precision. Initialisation and update order can affect the solution reached because the joint problem need not be convex. Updates and loss evaluation use the same observation weights, strengths and floored logarithms.</p>
+<p><code>network.diagnostics.loss_history</code> stores the loss before the first iteration and after each complete iteration. Fitting stops when the relative change is at most <code>tol</code>, or after <code>max_iter</code> iterations. A rise exceeding <span class="arithmatex">\(256\epsilon\max(1,|L_{\mathrm{previous}}|)\)</span> emits a <code>LossIncreaseWarning</code>, where <span class="arithmatex">\(\epsilon\)</span> is dtype machine precision.</p>
+<p>Continue with <a href="../prediction/">Predicting new observations</a> for inference with the learned parameters fixed.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "content.code.copy", "search.suggest", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16/dist/plot.umd.min.js"></script>
+      
+        <script src="../../javascripts/figures.js"></script>
+      
+    
+  </body>
+</html>

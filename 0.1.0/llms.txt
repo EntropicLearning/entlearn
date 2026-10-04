@@ -1,0 +1,40 @@
+# Entlearn
+
+> Tensor-native entropic-learning primitives for PyTorch.
+
+Entlearn: a pure-tensor PyTorch implementation of EON (Entropy-Optimal Networks), fit by exact block-coordinate descent.
+
+## Guide
+
+- [Estimators](https://entropiclearning.github.io/entlearn/0.1.0/guide/estimators/index.md)
+- [Hyperparameters](https://entropiclearning.github.io/entlearn/0.1.0/guide/hyperparameters/index.md)
+- [Installation](https://entropiclearning.github.io/entlearn/0.1.0/guide/installation/index.md)
+- [Introduction](https://entropiclearning.github.io/entlearn/0.1.0/guide/introduction/index.md)
+- [Manifold](https://entropiclearning.github.io/entlearn/0.1.0/guide/manifold/index.md)
+- [Model selection](https://entropiclearning.github.io/entlearn/0.1.0/guide/model_selection/index.md)
+- [Networks](https://entropiclearning.github.io/entlearn/0.1.0/guide/networks/index.md)
+- [Package and Recipes](https://entropiclearning.github.io/entlearn/0.1.0/guide/package/index.md)
+- [Plotting](https://entropiclearning.github.io/entlearn/0.1.0/guide/plotting/index.md)
+- [Suitability and scaling](https://entropiclearning.github.io/entlearn/0.1.0/guide/suitability/index.md)
+- [Troubleshooting](https://entropiclearning.github.io/entlearn/0.1.0/guide/troubleshooting/index.md)
+
+## Concepts
+
+- [Overview](https://entropiclearning.github.io/entlearn/0.1.0/concepts/index.md)
+- [Glossary](https://entropiclearning.github.io/entlearn/0.1.0/concepts/glossary/index.md)
+- [Learning the model](https://entropiclearning.github.io/entlearn/0.1.0/concepts/learning/index.md)
+- [The objective](https://entropiclearning.github.io/entlearn/0.1.0/concepts/loss/index.md)
+- [Notation](https://entropiclearning.github.io/entlearn/0.1.0/concepts/notation/index.md)
+- [Predicting new observations](https://entropiclearning.github.io/entlearn/0.1.0/concepts/prediction/index.md)
+- [Representing observations](https://entropiclearning.github.io/entlearn/0.1.0/concepts/representation/index.md)
+
+## API
+
+- [API reference](https://entropiclearning.github.io/entlearn/0.1.0/reference/index.md)
+- [Optional helpers](https://entropiclearning.github.io/entlearn/0.1.0/reference/helpers/index.md)
+- [Network](https://entropiclearning.github.io/entlearn/0.1.0/reference/network/index.md)
+- [Plotting](https://entropiclearning.github.io/entlearn/0.1.0/reference/plotting/index.md)
+- [Primitives](https://entropiclearning.github.io/entlearn/0.1.0/reference/primitives/index.md)
+- [Recipe](https://entropiclearning.github.io/entlearn/0.1.0/reference/recipe/index.md)
+- [Scikit-learn](https://entropiclearning.github.io/entlearn/0.1.0/reference/scikit_adapter/index.md)
+
