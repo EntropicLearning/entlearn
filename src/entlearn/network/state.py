@@ -107,7 +107,7 @@ class FitDiagnostics:
     Attributes:
         loss_history: Initial loss followed by one loss per complete iteration.
         n_iter: Total number of complete iterations.
-        converged: Whether the final iteration met the relative tolerance.
+        converged: Whether the final iteration met the stopping test for ``tol``.
         warnings: Warning messages produced during the fit.
         initialisation_outcomes: One selection record per candidate, in seed order: its
             ``index``, ``seed``, ``score`` (the selection loss; smaller is better),
@@ -363,12 +363,16 @@ class InitialState:
 
 @dataclass(frozen=True)
 class _Trajectory:
-    """One fit's loss and termination record, apart from any selection."""
+    """One fit's loss and termination record, apart from any selection.
+
+    ``checkpoint_dtype`` is the precision in which the last loss in ``loss_history`` was computed.
+    """
 
     loss_history: tuple[float, ...]
     n_iter: int
     converged: bool
     warnings: tuple[str, ...]
+    checkpoint_dtype: torch.dtype
 
 
 @dataclass(frozen=True)
@@ -419,14 +423,5 @@ class _NetworkRecord:
 
     @property
     def winner(self) -> int:
-        """Return the index of the selected fit's original state, ``0`` when none are retained.
-
-        Raises:
-            ValueError: If the retained state at the selected index is not the selected fit's.
-        """
-        if self.states is None:
-            return 0
-        index = self.selection.selected_index
-        if index >= len(self.states) or self.states[index] is not self.fitted.initial_state:
-            raise ValueError("no retained original state is the selected fit's initial state")
-        return index
+        """Return the index of the selected fit's original state, ``0`` when none are retained."""
+        return 0 if self.states is None else self.selection.selected_index

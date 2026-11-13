@@ -1,11 +1,12 @@
 """Fresh fits from compatible original input geometry."""
 
+import re
 import warnings
 from dataclasses import replace
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import resume_case, squared_error, validation_pairs
 
 from entlearn import (
@@ -26,6 +27,19 @@ def provided_messages(caught):
     return [str(item.message) for item in caught if str(item.message).startswith("InitialState")]
 
 
+def assert_provided_warnings(caught, fitted, *patterns):
+    """Assert one provided-state warning per pattern, in order, as the diagnostics record them.
+
+    Each pattern names the part of the state and the short reason.
+    """
+    messages = provided_messages(caught)
+    assert len(messages) == len(patterns), messages
+    for message, pattern in zip(messages, patterns, strict=True):
+        assert re.search(pattern, message), (pattern, message)
+    recorded = [message for message in fitted.diagnostics.warnings if message in messages]
+    assert recorded == messages
+
+
 def small_problem():
     """Return eight ordered rows in two classes and a one-input classification Recipe."""
     X = torch.linspace(0, 1, 16, dtype=DTYPE, device=DEVICE).reshape(8, 2)
@@ -34,6 +48,7 @@ def small_problem():
 
 
 class TestInitialStateReuse:
+    @FIXED_BUDGET
     @pytest.mark.parametrize(
         ("change", "message"),
         [({"W_std": 0.2}, r"W_std.*0\.0.*0\.2"), ({"K": 6}, r"K=6.*4 centroids")],
@@ -49,6 +64,7 @@ class TestInitialStateReuse:
             fitted = Network.fit(changed, X, y, initial_state=state, max_iter=1)
         assert fitted.initial_state.input_geometry.input == changed.blocks[0]
 
+    @FIXED_BUDGET
     def test_geometry_of_another_input_kind_warns_and_regenerates(self):
         X, y, recipe = small_problem()
         state = Network.initialise(recipe, X, y)
@@ -57,6 +73,7 @@ class TestInitialStateReuse:
             fitted = Network.fit(manifold, X, y, initial_state=state, max_iter=1)
         assert fitted.initial_state.input_geometry.input == manifold.blocks[0]
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("kind", ["standard", "manifold"])
     def test_captured_geometry_trimmed_below_its_recorded_width_raises(self, kind):
         recipe, X, y, _ = resume_case(kind=kind)
@@ -84,7 +101,7 @@ class TestInitialStateReuse:
                 lambda g: {
                     "manifold_projectors": torch.ones_like(g.continuous_centroids)[..., None]
                 },
-                "standard input cannot have manifold_projectors",
+                "cannot have manifold_projectors",
             ),
             (
                 lambda g: {"categorical_centroids": (g.categorical_centroids[0][:-1],)},
@@ -190,12 +207,13 @@ class TestInitialStateReuse:
             atol=0,
         )
 
+    @FIXED_BUDGET
     def test_initialise_subset_keeps_full_categorical_vocabulary_and_caps_width(self):
         X = torch.arange(6, dtype=DTYPE, device=DEVICE).reshape(-1, 1)
         y = torch.tensor([0, 1, 0, 1, 0, 1], device=DEVICE)
         codes = torch.tensor([0, 1, 0, 1, 2, 2], device=DEVICE)
         recipe = Recipe.chain(Input(K=5), ClassificationHead(coupling=Coupling.M))
-        with pytest.warns(UserWarning, match="K"):
+        with pytest.warns(UserWarning, match=r"K=5.*3.*reducing"):
             state = Network.initialise(
                 recipe,
                 X,
@@ -210,6 +228,7 @@ class TestInitialStateReuse:
             model = Network.fit(recipe, X, y, X_cat=(codes,), initial_state=state, max_iter=2)
         assert model.predict(X, X_cat=(codes,)).shape == (6, 2)
 
+    @FIXED_BUDGET
     def test_prefix_and_changed_objective_match_explicit_geometry(self):
         X = torch.rand(30, 2, generator=torch.Generator().manual_seed(13), dtype=DTYPE).to(DEVICE)
         y = (X[:, 0] > 0.5).long()
@@ -262,58 +281,45 @@ class TestUnusedProvidedState:
         X, y, recipe = small_problem()
         old = Recipe.chain(replace(recipe.blocks[0], name="old"), recipe.blocks[1])
         state = Network.initialise(old, X, y)
-        with pytest.warns(UserWarning, match="'old' matches no Recipe block") as caught:
+        with pytest.warns(UserWarning, match="'old.*' matches no Recipe") as caught:
             fitted = Network.fit(recipe, X, y, initial_state=state, max_iter=1)
-        unmatched = "InitialState block 'old' matches no Recipe block and is ignored; "
-        assert provided_messages(caught)[0] == unmatched + "initialising normally"
-        assert provided_messages(caught)[0] in fitted.diagnostics.warnings
+        assert_provided_warnings(caught, fitted, "'old' matches no Recipe block")
         assert fitted.initial_state.input_geometry.input == recipe.blocks[0]
 
-    @pytest.mark.parametrize("seeds", [True, False], ids=("with-seeds", "sole-group"))
-    def test_a_group_for_a_block_the_recipe_lacks_warns_once_per_part(self, seeds):
+    def test_a_group_for_a_block_the_recipe_lacks_warns_but_its_seeds_do_not(self):
         recipe, X, y, _ = resume_case()
         state = Network.fit(recipe, X, y, max_iter=1).capture_current_state(blocks=("hidden_1",))
-        if not seeds:
-            state = replace(state, connection_sub_seeds=())
+        assert dict(state.connection_sub_seeds).keys() == {
+            "input_to_hidden_1",
+            "hidden_1_to_output",
+        }
         renamed = Recipe.chain(
             recipe.blocks[0],
             replace(recipe.blocks[1], name="renamed"),
             recipe.blocks[2],
             coupling=Coupling.M,
         )
-        with pytest.warns(UserWarning, match="'hidden_1' matches no Recipe block") as caught:
+        with pytest.warns(UserWarning, match="hidden_1.*' matches no Recipe") as caught:
             fitted = Network.fit(renamed, X, y, initial_state=state, max_iter=1)
-        connections = ("input_to_hidden_1", "hidden_1_to_output") if seeds else ()
-        assert provided_messages(caught) == [
-            (
-                "InitialState block 'hidden_1' matches no Recipe block and is ignored; "
-                "initialising normally"
-            ),
-            *(
-                f"InitialState connection seed {name!r} matches no Recipe connection and is "
-                "ignored; initialising normally"
-                for name in connections
-            ),
-        ]
+        assert_provided_warnings(caught, fitted, "'hidden_1' matches no Recipe block")
         assert fitted.initial_state.parameters == ()
 
-    @pytest.mark.parametrize("geometry", [True, False], ids=("with-geometry", "sole-seed"))
-    def test_a_connection_seed_the_recipe_lacks_warns_and_is_ignored(self, geometry):
+    # A seed the Recipe lacks is ignored silently; a state of such seeds alone is unused.
+    @pytest.mark.parametrize(
+        ("geometry", "patterns"),
+        [(True, ()), (False, ("holds no group",))],
+        ids=("with-geometry", "sole-seed"),
+    )
+    def test_a_connection_seed_the_recipe_lacks_is_ignored(self, geometry, patterns):
         X, y, recipe = small_problem()
         state = Network.initialise(recipe, X, y) if geometry else InitialState()
         extra = (*state.connection_sub_seeds, ("input_to_gone", 5))
-        with pytest.warns(
-            UserWarning, match="'input_to_gone' matches no Recipe connection"
-        ) as caught:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             fitted = Network.fit(
                 recipe, X, y, initial_state=replace(state, connection_sub_seeds=extra), max_iter=1
             )
-        message = (
-            "InitialState connection seed 'input_to_gone' matches no Recipe connection and is "
-            "ignored; initialising normally"
-        )
-        assert provided_messages(caught) == [message]
-        assert message in fitted.diagnostics.warnings
+        assert_provided_warnings(caught, fitted, *patterns)
         assert [name for name, _ in fitted.initial_state.connection_sub_seeds] == [
             "input_to_output"
         ]
@@ -323,14 +329,8 @@ class TestUnusedProvidedState:
         lone = InitialState(input_geometry=Network.initialise(recipe, X, y).input_geometry)
         wider = recipe.replace_block("input", K=4)
         with pytest.warns(UserWarning, match="is incompatible") as caught:
-            Network.fit(wider, X, y, initial_state=lone, max_iter=1)
-        assert provided_messages(caught) == [
-            (
-                "InitialState block 'input' is incompatible (requested K=4 exceeds the original "
-                "request for 3 centroids; generate a new InitialState for a larger model); "
-                "initialising normally"
-            )
-        ]
+            fitted = Network.fit(wider, X, y, initial_state=lone, max_iter=1)
+        assert_provided_warnings(caught, fitted, r"'input' is incompatible.*K=4.*3 centroids")
 
     def test_supplied_geometry_with_fewer_centroids_than_K_warns_with_both_widths(self):
         X, y, recipe = small_problem()
@@ -339,16 +339,13 @@ class TestUnusedProvidedState:
             state = Network.initialise(recipe, X, y, init_rows=rows)
         with pytest.warns(UserWarning, match="holds 2 centroids") as caught:
             fitted = Network.fit(recipe, X, y, initial_state=state, max_iter=1)
-        assert provided_messages(caught) == [
-            (
-                "InitialState block 'input' holds 2 centroids for the requested K=3; "
-                "fitting 2 input clusters"
-            )
-        ]
+        assert_provided_warnings(caught, fitted, r"'input' holds 2 centroids.*K=3")
         assert dict(fitted.schema.K_active)["input"] <= 2
 
-    def test_geometry_capped_inside_the_fit_warns_once_per_candidate(self):
-        X, y, recipe = small_problem()
+    @pytest.mark.parametrize("W_std", (0.0, 0.5))
+    def test_geometry_capped_inside_the_fit_warns_once(self, W_std):
+        X, y, _ = small_problem()
+        recipe = Recipe.chain(Input(K=3, W_std=W_std), ClassificationHead(Coupling.M))
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             Network.fit(
@@ -362,16 +359,14 @@ class TestUnusedProvidedState:
                 max_iter=1,
             )
         capped = [item for item in caught if "reducing the initial" in str(item.message)]
-        assert len(capped) == 2
+        assert len(capped) == 1  # the candidates are seeded together
         assert provided_messages(caught) == []
 
     def test_an_empty_state_warns_once_that_it_is_not_used(self):
         X, y, recipe = small_problem()
         with pytest.warns(UserWarning, match="holds no group") as caught:
-            Network.fit(recipe, X, y, initial_state=InitialState(), max_iter=1)
-        assert provided_messages(caught) == [
-            "InitialState holds no group or connection seed of this Recipe; initialising normally"
-        ]
+            fitted = Network.fit(recipe, X, y, initial_state=InitialState(), max_iter=1)
+        assert_provided_warnings(caught, fitted, "holds no group")
 
     def test_a_state_of_used_connection_seeds_alone_raises_no_warning(self):
         recipe, X, y, _ = resume_case()
@@ -401,13 +396,12 @@ class TestUnusedProvidedState:
             recipe.blocks[2],
             coupling=Coupling.M,
         )
-        with pytest.warns(UserWarning, match="matches no Recipe block"):
+        with pytest.warns(UserWarning, match="matches no Recipe"):
             fitted = Network.fit(renamed, X, y, initial_state=state, max_iter=1)
-        assert [m for m in fitted.diagnostics.warnings if "matches no Recipe block" in m] == [
-            f"InitialState block {name!r} matches no Recipe block and is ignored; "
-            "initialising normally"
-            for name in ("input", "hidden_1")
-        ]
+        unmatched = [m for m in fitted.diagnostics.warnings if "matches no Recipe block" in m]
+        assert len(unmatched) == 2
+        assert "'input'" in unmatched[0]
+        assert "'hidden_1'" in unmatched[1]
 
     @pytest.mark.parametrize("seeds", [True, False], ids=("with-seeds", "without-seeds"))
     def test_a_used_downstream_only_state_raises_no_warning(self, seeds):

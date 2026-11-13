@@ -1,4 +1,4 @@
-"""Source-policy checks for the Python tree."""
+"""Source-policy checks for the Python tree and the doc site."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"
+TEST_ROOT = REPOSITORY_ROOT / "tests"
 NEW_SOURCE_ROOT = SOURCE_ROOT / "entlearn"
 HELPER_SOURCE_ROOT = NEW_SOURCE_ROOT / "helpers"
 ADAPTER_SOURCE_ROOT = NEW_SOURCE_ROOT / "scikit_adapter"
@@ -64,6 +65,10 @@ def _relative(path: Path) -> str:
 
 def _source_files() -> list[Path]:
     return sorted(SOURCE_ROOT.rglob("*.py"))
+
+
+def _test_files() -> list[Path]:
+    return sorted(TEST_ROOT.rglob("*.py"))
 
 
 def _imported_roots(tree: ast.AST) -> set[str]:
@@ -320,7 +325,7 @@ def _comments(source: str) -> list[str]:
 class TestSourcePolicy:
     def test_collected_tests_are_grouped_in_classes(self) -> None:
         violations = []
-        for path in sorted((REPOSITORY_ROOT / "tests").rglob("test_*.py")):
+        for path in sorted(TEST_ROOT.rglob("test_*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             violations.extend(
                 f"{_relative(path)}:{node.lineno}: {node.name}"
@@ -430,14 +435,27 @@ class TestSourcePolicy:
         }
         assert not violations, violations
 
-    def test_source_prose_has_no_prohibited_references(self) -> None:
+    def test_source_and_test_prose_has_no_prohibited_references(self) -> None:
         violations = set()
-        for path in _source_files():
+        for path in [*_source_files(), *_test_files()]:
             source = path.read_text(encoding="utf-8")
             prose = (*_docstrings(ast.parse(source, filename=str(path))), *_comments(source))
             if any(pattern.search(item) for pattern in PROHIBITED_PROSE for item in prose):
                 violations.add(_relative(path))
         assert not violations, sorted(violations)
+
+    def test_documentation_prose_has_no_prohibited_references(self) -> None:
+        pages = [
+            *sorted((REPOSITORY_ROOT / "docs_site").rglob("*.md")),
+            REPOSITORY_ROOT / "mkdocs.yml",
+        ]
+        violations = [
+            f"{_relative(path)}:{number}"
+            for path in pages
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if any(pattern.search(line) for pattern in PROHIBITED_PROSE)
+        ]
+        assert not violations, violations
 
     def test_decoded_descriptions_reach_a_validating_owner(self) -> None:
         sources = [

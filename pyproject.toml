@@ -1,6 +1,6 @@
 [project]
 name = "entlearn"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tensor-native entropic-learning primitives for PyTorch"
 readme = "README.md"
 authors = [
@@ -36,7 +36,7 @@ rich = ["rich>=14"]
 sklearn = ["joblib>=1.4", "narwhals>=2.21.2", "scikit-learn>=1.9.0"]
 
 [build-system]
-requires = ["uv_build>=0.12.3,<0.13.0"]
+requires = ["uv_build>=0.12.3,<0.14.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -70,15 +70,21 @@ docs = [
 default-groups = ["dev", "docs"]
 
 [tool.poe.tasks]
-docs = "mkdocs serve"               # live-reload preview at localhost:8000
-docs-build = "mkdocs build --strict"
+docs-export = "python scripts/export_tutorials.py"
+docs = "mkdocs serve"  # live-reload preview at localhost:8000
+docs-build = ["docs-export", { cmd = "mkdocs build --strict" }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = [
+    "error",
     "error::entlearn.LossIncreaseWarning",
     "error:An output with one or more elements was resized:UserWarning",
+    # optuna-integration's OptunaSearchCV, run by a guide example, calls optuna's
+    # deprecated terminator module and is itself marked experimental.
+    "ignore:`optuna.terminator` module has been deprecated:FutureWarning",
+    "ignore:OptunaSearchCV is experimental",
 ]
 
 [tool.coverage.report]
@@ -101,16 +107,32 @@ extend-select = [
     "B",   # flake8-bugbear
     "SIM", # flake8-simplify
     "RUF", # ruff-specific
+    "PT011", # a broad pytest.raises names the message it expects
+    "PT012", # a pytest.raises block holds the one call it expects to raise
+    "C901", # cyclomatic complexity, bounded by mccabe.max-complexity
+    "TID251", # banned APIs, listed under flake8-tidy-imports.banned-api
 ]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.flake8-pytest-style]
+raises-extend-require-match-for = ["RuntimeError", "TypeError"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"torch.finfo".msg = "use `_eps(dtype)` for precision or `_tiny(dtype)` for range guards, from `entlearn.primitives.normalise`"
+"numpy.finfo".msg = "use `_eps(dtype)` for precision or `_tiny(dtype)` for range guards, from `entlearn.primitives.normalise`"
+
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["D"]  # tests need not be docstring-complete
+"tests/**" = ["D", "C901", "TID251"]  # tests need not be docstring-complete or simple, and read finfo
+"src/entlearn/primitives/normalise.py" = ["TID251"]  # dtype constants
+"src/entlearn/plotting/**" = ["TID251"]  # `.tiny` clamps
 "examples/*.py" = ["D100", "B018", "PLR1711"]
 "scripts/*.py" = ["D100", "B018"]  # derivation scripts: the same relaxations as examples/
-"scripts/test_*.py" = ["D"]  # the derivation script's own test need not be docstring-complete
+"scripts/test_*.py" = ["D", "C901"]  # the scripts checks are tests: the same relaxations as tests/
 
 [tool.ruff.format]
 docstring-code-format = true       # format code blocks inside docstrings

@@ -1,4 +1,6 @@
-"""Tests for the weighted squared-distance kernel."""
+"""Tests for the weighted squared-distance kernels and the seed dissimilarities."""
+
+import math
 
 import pytest
 import torch
@@ -7,15 +9,28 @@ from conftest import DEVICE, DTYPE
 
 from entlearn.primitives.distance import (
     assemble_categorical_cost_,
-    assemble_euclidean_cost_,
+    dissimilarity_to_rows,
     refresh_weighted_norm_,
     weighted_sq_distance_,
     weighted_sq_norm_,
 )
+from entlearn.primitives.normalise import _tiny
 from primitives._fixtures import SEEDS, assert_close, empty, generator, rand, randn, stochastic
 
 SHAPES = [(7, 4, 3), (10, 1, 4), (6, 3, 1), (5, 5, 5)]
 CAT_SHAPES = [(7, 3, 4), (10, 2, 5), (6, 5, 3), (5, 4, 5)]  # (T, M_d, K); K <= T, M_d >= 2
+
+
+class TestSeedingLogPrice:
+    @pytest.mark.parametrize("distribution", [False, True])
+    def test_missing_levels_use_the_same_tiny_log_floor_as_fitting(self, distribution):
+        codes = torch.tensor([0, 1], dtype=torch.int64, device=DEVICE)
+        feature = torch.nn.functional.one_hot(codes, 2).to(DTYPE) if distribution else codes
+        X = torch.empty(2, 0, dtype=DTYPE, device=DEVICE)
+        distance = dissimilarity_to_rows(X, [feature], X.new_empty(0), X.new_ones(1))
+        actual = distance(torch.tensor([0], device=DEVICE))
+        expected = torch.tensor([[0.0], [-math.log(_tiny(DTYPE))]], dtype=DTYPE, device=DEVICE)
+        assert_close(actual, expected)
 
 
 def _reference(A, B, feature_weights=None):
@@ -63,63 +78,28 @@ class TestWeightedSqDistance:
         assert_zero_alloc(weighted_sq_distance_, out, A, B, A_sq_sum, scratch_K, scratch_KD)
         assert_close(out, _reference(A, B))
 
-
-class TestAssembleEuclideanCost:
-    @pytest.mark.parametrize("shape", SHAPES)
-    @pytest.mark.parametrize("seed", SEEDS)
-    def test_matches_reference(self, shape, seed):
-        T, _D, K = shape
-        X, C, Wd, X_sq_wd_sum, _, scratch_K, scratch_KD = _make(*shape, seed=seed, weighted=True)
-        g = generator(seed + 1)
-        Wt = rand(T, g=g)
-        cost = randn(T, K, g=g)  # pre-filled: checks +=
-        cost_before = cost.clone()
-        sqdist_wd = empty(T, K)
-        assert_zero_alloc(
-            assemble_euclidean_cost_,
-            cost,
-            sqdist_wd,
-            X,
-            C,
-            Wd,
-            Wt,
-            X_sq_wd_sum,
-            scratch_KD,
-            scratch_K,
-        )
-        sq_ref = _reference(X, C, Wd)
-        assert_close(sqdist_wd, sq_ref)
-        assert_close(cost, cost_before.cpu() + Wt.cpu().unsqueeze(1) * sq_ref)
+    def test_without_the_row_term_every_row_shifts_by_its_norm(self):
+        A, B, w, A_sq_sum, out, scratch_K, scratch_KD = _make(7, 4, 3, seed=0, weighted=True)
+        weighted_sq_distance_(out, A, B, None, scratch_K, scratch_KD, feature_weights=w)
+        assert_close(out, _reference(A, B, w) - A_sq_sum.cpu().unsqueeze(1))
 
 
-def _make_cat(T, M, K, *, seed, integer_codes, sparse=False):
+def _make_cat(T, M, K, *, seed, integer_codes):
     g = generator(seed)
     C = stochastic(K, M, dim=1, g=g)  # distribution over categories
-    logC = C.clamp_min(torch.finfo(DTYPE).eps).log()
+    logC = C.clamp_min(_tiny(DTYPE)).log()
     if integer_codes:
         X_cat = torch.randint(0, M, (T,), generator=g, device=DEVICE)
     else:
         X_cat = rand(T, M, g=g)
-        if sparse:
-            keep = rand(T, M, g=g) > 0.5
-            keep[
-                torch.arange(T, device=DEVICE),
-                torch.randint(0, M, (T,), generator=g, device=DEVICE),
-            ] = True
-            X_cat = X_cat * keep
         X_cat /= X_cat.sum(1, keepdim=True)
-        if sparse:
-            X_cat = X_cat.to_sparse_csr()
-    Wt = rand(T, g=g)
     weight_scale = 0.5 + float(rand(g=g))  # positive scale
     xent_scratch = empty(T, K)
-    return X_cat, logC, weight_scale, Wt, xent_scratch
+    return X_cat, logC, weight_scale, xent_scratch, empty(M, K) if integer_codes else None
 
 
 def _cat_ref(X_cat, logC, *, integer_codes):
     """Naive xent oracle: out[t, k] = -Σ_m X̃[m, t]·logC[k, m] (or -logC[k, code_t])."""
-    if X_cat.layout != torch.strided:  # sparse-format input: densify
-        X_cat = X_cat.to_dense()
     T = X_cat.shape[0]
     K, M = logC.shape
     xent = torch.zeros(T, K, dtype=logC.dtype)
@@ -138,79 +118,45 @@ class TestAssembleCategoricalCost:
     @pytest.mark.parametrize("seed", SEEDS)
     def test_matches_reference(self, shape, seed, integer_codes):
         T, M, K = shape
-        X_cat, logC, ws, Wt, xent_scratch = _make_cat(
+        X_cat, logC, ws, xent_scratch, scratch_MK = _make_cat(
             T, M, K, seed=seed, integer_codes=integer_codes
         )
-        g = generator(seed + 7)
-        cat_cost = randn(T, K, g=g)  # pre-filled: checks +=
-        disc_cost = randn(T, K, g=g)
-        cat_before, disc_before = cat_cost.clone(), disc_cost.clone()
+        cost = randn(T, K, g=generator(seed + 7))  # pre-filled: checks +=
+        before = cost.clone()
         assert_zero_alloc(
-            assemble_categorical_cost_, disc_cost, cat_cost, xent_scratch, X_cat, logC, ws, Wt
+            assemble_categorical_cost_, cost, xent_scratch, X_cat, logC, ws, scratch_MK
         )
-        xent = _cat_ref(X_cat, logC, integer_codes=integer_codes)
-        assert_close(cat_cost, cat_before.cpu() + ws * xent)
-        assert_close(disc_cost, disc_before.cpu() + ws * Wt.cpu().unsqueeze(1) * xent)
+        added = ws * _cat_ref(X_cat, logC, integer_codes=integer_codes)
+        assert_close(cost, before.cpu() + added)
+        assert_close(xent_scratch, added)
 
     def test_accepts_a_device_scalar_without_allocation(self):
-        X_cat, logC, scale, Wt, scratch = _make_cat(7, 4, 3, seed=0, integer_codes=True)
-        cat_cost = empty(7, 3)
-        disc_cost = empty(7, 3)
-        cat_cost.zero_()
-        disc_cost.zero_()
+        X_cat, logC, scale, scratch, scratch_MK = _make_cat(7, 4, 3, seed=0, integer_codes=True)
+        cost = empty(7, 3)
+        cost.zero_()
 
         assert_zero_alloc(
             assemble_categorical_cost_,
-            disc_cost,
-            cat_cost,
+            cost,
             scratch,
             X_cat,
             logC,
             torch.tensor(scale, dtype=DTYPE, device=DEVICE),
-            Wt,
+            scratch_MK,
         )
 
-        xent = _cat_ref(X_cat, logC, integer_codes=True)
-        assert_close(cat_cost, scale * xent)
-        assert_close(disc_cost, scale * Wt.cpu().unsqueeze(1) * xent)
+        assert_close(cost, scale * _cat_ref(X_cat, logC, integer_codes=True))
 
-    @pytest.mark.filterwarnings("ignore:Sparse CSR tensor support is in beta")
-    @pytest.mark.parametrize("shape", CAT_SHAPES)
-    @pytest.mark.parametrize("seed", SEEDS)
-    def test_matches_reference_sparse_distribution(self, shape, seed):
-        T, M, K = shape
-        X_cat, logC, ws, Wt, xent_scratch = _make_cat(
-            T, M, K, seed=seed, integer_codes=False, sparse=True
-        )
-        g = generator(seed + 7)
-        cat_cost = randn(T, K, g=g)
-        disc_cost = randn(T, K, g=g)
-        cat_before, disc_before = cat_cost.clone(), disc_cost.clone()
-        assemble_categorical_cost_(disc_cost, cat_cost, xent_scratch, X_cat, logC, ws, Wt)
-        xent = _cat_ref(X_cat, logC, integer_codes=False)
-        assert_close(cat_cost, cat_before.cpu() + ws * xent)
-        assert_close(disc_cost, disc_before.cpu() + ws * Wt.cpu().unsqueeze(1) * xent)
+    def test_integer_codes_cost_exactly_what_their_one_hot_rows_cost(self):
+        codes, logC, scale, scratch, scratch_MK = _make_cat(23, 5, 4, seed=0, integer_codes=True)
+        scale = torch.tensor(scale, dtype=DTYPE, device=DEVICE)
+        costs = []
+        for rows in (codes, torch.nn.functional.one_hot(codes, 5).to(DTYPE)):
+            cost = empty(23, 4).zero_()
+            assemble_categorical_cost_(cost, scratch, rows, logC, scale, scratch_MK)
+            costs.append(cost)
 
-    def test_int_codes_equal_onehot_distribution(self):
-        # The int-code fast path must equal the distribution path on a one-hot.
-        T, M, K = 6, 4, 3
-        g = generator(123)
-        codes = torch.randint(0, M, (T,), generator=g, device=DEVICE)
-        C = stochastic(K, M, dim=1, g=g)
-        logC = C.log()
-        Wt = rand(T, g=g)
-        ws = 0.7
-        onehot = torch.zeros(T, M, dtype=DTYPE, device=DEVICE)
-        onehot[torch.arange(T, device=DEVICE), codes] = 1.0
-        results = []
-        for x in (codes, onehot):
-            cat_cost = torch.zeros(T, K, dtype=DTYPE, device=DEVICE)
-            disc_cost = torch.zeros(T, K, dtype=DTYPE, device=DEVICE)
-            xent_scratch = empty(T, K)
-            assemble_categorical_cost_(disc_cost, cat_cost, xent_scratch, x, logC, ws, Wt)
-            results.append((cat_cost, disc_cost))
-        assert_close(results[0][0], results[1][0])
-        assert_close(results[0][1], results[1][1])
+        assert torch.equal(costs[0], costs[1])
 
 
 def _xsqwd_ref(X_sq, Wd):
@@ -249,6 +195,12 @@ class TestWeightedSqNorm:
         weighted_sq_norm_(out, X, Wd)
         assert_close(out, expected)
 
+    def test_without_weights_is_the_squared_norm(self):
+        X = randn(50, 6, g=generator(5))
+        out = empty(50)
+        weighted_sq_norm_(out, X)
+        assert_close(out, (X * X).sum(dim=1))
+
     def test_result_is_independent_of_the_block_size(self, monkeypatch):
         # The reduction routes through BLAS, whose round-off may differ per block
         # shape, so the block split is pinned to closeness rather than bit equality.
@@ -259,7 +211,8 @@ class TestWeightedSqNorm:
         Wd = rand(6, g=g)
         whole = empty(50)
         weighted_sq_norm_(whole, X, Wd)
-        monkeypatch.setattr(distance_module, "_NORM_BLOCK_BYTES", 96)  # two rows per block
+        # 96 bytes holds 2 rows of 6 features per block in float64, 4 in float32.
+        monkeypatch.setattr(distance_module, "_NORM_BLOCK_BYTES", 96)
         blocked = empty(50).fill_(float("nan"))  # an unwritten row stays NaN
         weighted_sq_norm_(blocked, X, Wd)
         assert_close(blocked, whole)
@@ -269,3 +222,56 @@ class TestWeightedSqNorm:
         out.fill_(7.0)
         weighted_sq_norm_(out, empty(3, 0), empty(0))
         assert torch.equal(out, torch.zeros(3, dtype=DTYPE, device=DEVICE))
+
+
+def _direct_dissimilarity(X, X_cat, Wd_cont, Wd_cat, seed):
+    """Direct-difference oracle: ``Σ_d w_d (x_d - x_sd)² + Σ_i w_i·(-Σ_m p_im log max(p_sim, tiny))``."""
+    difference = X - X[seed]
+    d2 = (Wd_cont * difference * difference).sum(dim=1)
+    for weight, rows in zip(Wd_cat, X_cat, strict=True):
+        d2 += weight * -(rows * rows[seed].clamp_min(_tiny(DTYPE)).log()).sum(dim=1)
+    return d2
+
+
+class TestDissimilarityToRows:
+    def test_dissimilarities_match_the_direct_difference(self):
+        g = torch.Generator().manual_seed(2)
+        X = torch.rand(50, 6, generator=g, dtype=DTYPE).to(DEVICE)
+        Wd = torch.rand(6, generator=g, dtype=DTYPE).to(DEVICE)
+        distribution = torch.softmax(torch.rand(50, 3, generator=g, dtype=DTYPE), dim=1).to(DEVICE)
+        codes = torch.randint(0, 4, (50,), generator=g).to(DEVICE)
+        one_hot = torch.nn.functional.one_hot(codes, 4).to(DTYPE)
+        Wd_cat = torch.full((2,), 0.05, dtype=DTYPE, device=DEVICE)
+        seeds = torch.arange(50, device=DEVICE)  # every row, so the self-dissimilarities too
+
+        columns = dissimilarity_to_rows(X, [distribution, codes], Wd, Wd_cat)(seeds)
+
+        direct = torch.stack(
+            [_direct_dissimilarity(X, [distribution, one_hot], Wd, Wd_cat, s) for s in range(50)],
+            dim=1,
+        )
+        # Every dissimilarity is below 8 and each term a weighted sum of at most six products,
+        # so the rounding of the two forms stays within 64 eps.
+        torch.testing.assert_close(columns, direct, rtol=0, atol=64 * torch.finfo(DTYPE).eps)
+
+    def test_dissimilarities_are_never_negative(self):
+        g = torch.Generator().manual_seed(2)
+        X = torch.rand(50, 6, generator=g, dtype=DTYPE).to(DEVICE)
+        Wd = torch.rand(6, generator=g, dtype=DTYPE).to(DEVICE)
+        seeds = torch.arange(50, device=DEVICE)  # the expansion rounds some self-terms below 0
+
+        columns = dissimilarity_to_rows(X, [], Wd, Wd[:0])(seeds)
+
+        assert bool((columns >= 0).all())
+
+    def test_codes_give_their_one_hot_rows_bits(self):
+        codes = (torch.arange(40, device=DEVICE) * 7) % 4
+        one_hot = torch.nn.functional.one_hot(codes, 4).to(DTYPE)
+        X = torch.rand(40, 3, generator=torch.Generator().manual_seed(6), dtype=DTYPE).to(DEVICE)
+        Wd = torch.full((3,), 0.2, dtype=DTYPE, device=DEVICE)
+        seeds = torch.tensor([5, 6], device=DEVICE)  # codes 3 and 2
+
+        from_codes = dissimilarity_to_rows(X, [codes], Wd, Wd[:1])(seeds)
+        from_rows = dissimilarity_to_rows(X, [one_hot], Wd, Wd[:1])(seeds)
+
+        assert torch.equal(from_codes, from_rows)

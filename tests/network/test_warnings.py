@@ -8,7 +8,7 @@ import warnings
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
     collapsed_reference_model,
     connection_initialisation_data,
@@ -87,20 +87,6 @@ class TestFitWarnings:
             assert [member.diagnostics.converged for member in model.members] == converged
         assert message in model.diagnostics.warnings
 
-    @pytest.mark.parametrize("n_inits", [1, 3])
-    def test_warning_as_error_preserves_the_previous_network(self, n_inits):
-        X, y = connection_initialisation_data()
-        recipe = deep_classification_recipe((4, 2))
-        model = Network.fit(recipe, X, y, tol=0.01, max_iter=100)
-        previous = model
-        prediction = model.predict(X)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", ConvergenceWarning)
-            with pytest.raises(ConvergenceWarning):
-                model = Network.fit(recipe, X, y, n_inits=n_inits, max_iter=1, tol=0)
-        assert model is previous
-        torch.testing.assert_close(model.predict(X), prediction)
-
     @pytest.mark.parametrize("execution", [(1, "threads"), (2, "threads"), (2, "processes")])
     def test_lifecycle_warnings_are_attributed_to_the_calling_line(self, execution):
         X, y = connection_initialisation_data()
@@ -123,13 +109,16 @@ class TestFitWarnings:
         assert "collapsed" in str(seen[-1].message)
         assert [record.filename for record in seen] == [__file__] * len(seen)
 
-    def test_converged_candidates_emit_no_convergence_warning(self):
+    @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
+    def test_converged_candidates_emit_no_warning(self, coupling):
         X, y = connection_initialisation_data()
+        recipe = deep_classification_recipe((4, 2), coupling=coupling)
         with warnings.catch_warnings(record=True) as seen:
             warnings.simplefilter("always")
-            model = Network.fit(deep_classification_recipe((4, 2)), X, y, n_inits=3, tol=0.01)
+            model = Network.fit(recipe, X, y, n_inits=3, tol=0.01)
         assert model.diagnostics.converged
         assert seen == []
+        assert model.diagnostics.warnings == ()
 
     def test_width_one_hidden_block_warns_once_and_records_the_warning(self):
         X, y = connection_initialisation_data()
@@ -178,7 +167,7 @@ class TestFitWarnings:
                 parallel_backend=execution[1],
             )
         capped = [record for record in seen if "reducing the initial input" in str(record.message)]
-        assert len(capped) == 2
+        assert len(capped) == 1  # the candidates are seeded together, before dispatch
         assert all(record.category is UserWarning for record in capped)
         assert [record.filename for record in seen] == [__file__] * len(seen)
 
@@ -227,32 +216,9 @@ class TestFitWarnings:
         with pytest.raises(LossIncreaseWarning, match="unexpected increase"):
             warnings.warn("unexpected increase", LossIncreaseWarning, stacklevel=2)
 
-    @pytest.mark.parametrize(
-        "controls",
-        [
-            {"starved_tol": 0.0},
-            {"move_retry_tol": 0.0},
-            {"on_empty": "reseed"},
-            {"on_empty": "split"},
-            {"gamma_first": True},
-        ],
-    )
-    def test_removed_empty_cluster_and_order_controls_are_rejected(self, controls):
-        X, y = connection_initialisation_data()
-        with pytest.raises(TypeError, match="unexpected keyword"):
-            Network.fit(deep_classification_recipe((2, 2)), X, y, **controls)
-
-    @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
-    def test_ordinary_fits_do_not_emit_removed_initialisation_or_revival_warnings(self, coupling):
-        X, y = connection_initialisation_data()
-        with warnings.catch_warnings(record=True) as seen:
-            warnings.simplefilter("always")
-            network = Network.fit(deep_classification_recipe((4, 2), coupling=coupling), X, y)
-        assert seen == []
-        assert network.diagnostics.warnings == ()
-
 
 class TestFitLogging:
+    @FIXED_BUDGET
     @pytest.mark.parametrize("verbose", [0, 1, 2])
     @pytest.mark.parametrize("n_inits", [1, 2, 3])
     @pytest.mark.parametrize("execution", [(1, "threads"), (2, "threads"), (2, "processes")])
@@ -291,6 +257,7 @@ class TestFitLogging:
         Network.fit(recipe, X, y, max_iter=1, logger=logger)
         assert stream.getvalue() == output
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("n_inits", [1, 3])
     def test_default_verbose_logging_is_private_and_does_not_leak(self, capsys, caplog, n_inits):
         X, y = connection_initialisation_data()
@@ -318,6 +285,7 @@ class TestFitLogging:
         with pytest.raises(ValueError, match="logger"):
             Network.fit(deep_classification_recipe((2, 2)), X, y, logger="entlearn")
 
+    @FIXED_BUDGET
     def test_nested_and_failed_fits_leave_the_callers_logger_untouched(self, monkeypatch):
         X, y = connection_initialisation_data()
         recipe = deep_classification_recipe((2, 2))

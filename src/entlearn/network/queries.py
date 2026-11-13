@@ -164,30 +164,6 @@ def inspect(
     return values
 
 
-def build_scoring_reference(
-    graph: _CompiledGraph,
-    X_cont: torch.Tensor,
-    X_cat: Sequence[torch.Tensor],
-    config: PredictConfig,
-) -> torch.Tensor | None:
-    """Get the reference instance weights on the training data, to be used by the scoring empirical CDF.
-
-    The fitted prediction policy must already be resolved. The result contains
-    recovered weights.
-
-    Raises:
-        RuntimeError: If the fitted recovery produces invalid reference values.
-    """
-    if not has_instance_weight_recovery(graph.input):
-        return None
-    reference = predict(
-        graph, X_cont, X_cat_new=X_cat, config=config, details=("instance_weights",)
-    ).instance_weights
-    if reference is None or not bool(torch.isfinite(reference).all() & (reference >= 0).all()):
-        raise RuntimeError("fitted recovery produced an invalid scoring reference")
-    return reference
-
-
 def _scores_available(network: "Network") -> bool:
     """Return whether ``network.score_samples`` can score queries."""
     return has_instance_weight_recovery(network._graph.input)
@@ -203,12 +179,11 @@ def score_samples(
     """Rank a query recovery against the retained fitted-config reference.
 
     Raises:
-        ValueError: If the model has no instance-weight recovery or no scoring reference.
+        ValueError: If the model has no instance-weight recovery.
     """
     if not has_instance_weight_recovery(graph.input):
         raise ValueError("score_samples requires fitted instance-weight recovery")
-    if reference is None or not reference.numel():
-        raise ValueError("score_samples requires a scoring reference")
+    assert reference is not None
     weights = predict(
         graph, X_cont, X_cat_new=X_cat, config=config, details=("instance_weights",)
     ).instance_weights

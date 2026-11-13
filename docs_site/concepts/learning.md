@@ -1,7 +1,7 @@
 # Learning the model
 
 Fitting uses block-coordinate descent on [the objective function](loss.md).
-Each update sets one group of parameters to its minimiser while the other groups remain fixed. Affiliations and weights solve linear costs with entropy rewards, transitions normalise weighted counts, and centroids solve weighted least-squares problems.
+Each update sets one group of parameters to its minimiser while the other groups remain fixed.
 
 One complete iteration proceeds from the head back to the input:
 
@@ -63,11 +63,11 @@ An input cost combines discretisation error with the outgoing connection. A hidd
 ### Affiliation temperatures
 
 Block `epsilon` sets $\varepsilon_n$. The default is zero, leading to hard affiliations.
-Finite positive values give soft affiliations, while larger values spread membership more broadly.
+Finite positive values lead to soft affiliations, while larger values spread membership more broadly.
 Infinite affiliation temperatures are rejected.
 
 !!! note "The temperature setting determines the regime"
-    The hard or soft regime is resolved once at the start of fitting, by comparing $\varepsilon_n$ with dtype machine precision. The comparison uses the block setting, even though the row temperature is $\tau_t=\varepsilon_nw_t$. With uniform weights, $\tau_t=\varepsilon_n/T$ and the common $1/T$ factor in the weighted costs cancels from the exponent. Increasing the number of rows therefore does not change the regime, which is kept during prediction. `network.inspect("affiliation_regimes")` reports `"hard"` or `"soft"` for each block.
+    `network.inspect("affiliation_regimes")` reports whether each block is operating in the `"hard"` or `"soft"` regime, which depends only on the temperature.
 
 Temperature effects depend on the feature scale and connection strengths.
 The [Model selection guide](../guide/model_selection.md) describes how to search over them.
@@ -119,7 +119,7 @@ Feature weights multiply each feature's objective by a constant and leave these 
 The updates use instance weights from the same iteration.
 
 !!! note "Weighted mass and empty clusters"
-    When $m_k$ is at or below dtype machine precision, continuous centroids become zero and categorical centroids become uniform. This weighted-mass fallback is distinct from [pruning](#pruning), which uses unweighted affiliation mass.
+    Masses at or below the smallest positive normal number are considered empty: continuous centroids become zero and categorical centroids become uniform. This is different from [pruning](#pruning), which uses unweighted affiliation mass.
 
 ### Manifold bases
 
@@ -169,9 +169,15 @@ b_t^{(T)}=\sum_k\Gamma_{tk}^{(0)}d_{tk}.
 $$
 
 For a manifold input, use $g_k(x_t)$ in place of $d_{tk}$.
-Observations with larger errors receive less weight in the soft update.
-At infinite `epsilon_T`, weights stay at the normalised sample weights.
-With finite temperature these starting values can change, and sample weights continue to act separately on the other terms.
+The [instance-weight penalty](loss.md#entropy-penalties) measures $W_T$ against the sample weights, which shifts each cost to $b_t^{(T)}-\varepsilon_T\log(Tw_t)$. The minimiser above becomes
+
+$$
+W_T[t]=\frac{w_t\exp(-b_t^{(T)}/\varepsilon_T)}{\sum_sw_s\exp(-b_s^{(T)}/\varepsilon_T)}.
+$$
+
+Each observation's instance weight depends on both its error and its sample weight.
+As `epsilon_T` grows, the update tends to the normalised sample weights, and with infinite `epsilon_T` (off) the instance weights are exactly the normalised sample weights.
+In the other terms, sample weights act independently of the instance weights.
 
 ### Output weights
 
@@ -188,8 +194,8 @@ Supplied output weights require infinite `epsilon_M`.
 ### Temperatures and effective dimension
 
 Weight temperatures are infinite by default, which holds their values fixed. 
-A finite temperature above dtype machine precision enables the softmax update once per iteration. 
-A temperature at or below machine precision selects the cheapest entry, with ties going to the lowest index. 
+A finite positive temperature enables the softmax update once per iteration.
+A zero temperature selects the cheapest entry, with ties going to the lowest index.
 Fixed weights and zero-temperature weights contribute no entropy term to the reported loss.
 
 A temperature is measured in the units of its cost vector. 
@@ -206,12 +212,13 @@ The [reporting helper](../reference/helpers.md#fitted-reporting) `effective_dime
 Form the labelled co-occurrence counts
 
 $$
-\nu_{mk}=\sum_tQ_{tm}\Gamma_{tk}^{(N)}.
+\nu_{mk}=\sum_tQ_{tm}\Gamma_{tk}^{(N)}+a_{\mathrm{out}}.
 $$
 
-Normalise columns for an M head and rows for an S head, as for hidden transitions. 
-Under M, a cluster with no labelled mass gets a uniform class distribution $1/M$. 
-Under S, a class with no labelled mass gets a uniform row $1/K_N$, while an unlabelled cluster contributes a column of zeros.
+The [head prior](loss.md#coupling-terms) $a_{\mathrm{out}}=(\theta_\alpha-1)/(M\,K_N^{\mathrm{initial}})$ is zero unless the head's pseudocounts are active.
+Normalise columns for a `Coupling.M` head and rows for a `Coupling.S` head, as for hidden transitions. 
+Under `Coupling.M`, a cluster with no labelled mass gets a uniform class distribution $1/M$. 
+Under `Coupling.S`, a class with no labelled mass gets a uniform row $1/K_N$, while an unlabelled cluster contributes a column of zeros, or of the prior's share when $a_{\mathrm{out}}>0$.
 
 ### Regression
 
@@ -234,19 +241,29 @@ The [Initialisation guide](../guide/networks.md#initialisation) explains the con
 ??? note "Input seeding procedure"
     Feature weights start at $1/D$ unless supplied or randomised with positive `W_std`. Randomisation draws independent normal logits with mean zero and standard deviation `W_std`, then applies softmax. Small `W_std` gives near-uniform weights and large values tend to concentrate them.
 
-    Centroids start at $K_0$ distinct observations selected by weighted k-means++ using both feature types and the starting feature weights. Categorical seeds are initially one-hot. Before the first iteration, categorical centroids are replaced by their weighted-frequency update using the first affiliations and starting instance weights. Continuous seeds retain their values.
-
+    Centroids start at $K_0$ distinct observations selected by weighted k-means++ using both feature types and the starting feature weights. Categorical starting centroids are one-hot. Before the first iteration, categorical centroids are replaced by their weighted-frequency update using the first affiliations and starting instance weights. Continuous starting centroids retain their values.
 
 ### Hidden transitions
 
 ??? note "Transition seeding procedure"
     Connections are seeded in order from the input using the fit's random seed. After each transition is seeded, its target affiliations are assigned using the forward prediction rule.
 
-    - **M with no more target than source clusters:** group source clusters into $K_n$ groups using k-means++ over their feature-space centroids, weighted by cluster masses. Each source column assigns all its mass to its group.
-    - **M with more target than source clusters:** select $K_n$ observations by k-means++ over source affiliations using cross-entropy dissimilarity. Assign observations to their nearest selection, then compute the transition from this hard partition.
-    - **S:** select observations by the same affiliation procedure and use their source affiliations as transition rows.
+    - **`Coupling.M` with fewer target than source clusters:** group source clusters into $K_n$ groups by the labels, as in [label-aware seeding](#label-aware-seeding). Each source column assigns all its mass to its group.
+    - **`Coupling.M` with as many target as source clusters:** each source cluster is its own group.
+    - **`Coupling.M` with more target than source clusters:** select $K_n$ observations by k-means++ over source affiliations using cross-entropy dissimilarity. Assign observations to their nearest selection, then compute the transition from this hard partition.
+    - **`Coupling.S` with more target than source clusters and $\delta_n$ below the source block's $\varepsilon_{n-1}$:** partition the observations into $K_n$ groups in feature space by the labels, as in [label-aware seeding](#label-aware-seeding), then compute the transition from this hard partition.
+    - **Every other `Coupling.S` connection:** select observations as for `Coupling.M` with more target clusters and use their source affiliations as transition rows.
 
     An active pseudocount is incorporated into seeded counts before normalisation. A transition supplied from a fitted network retains its values.
+
+#### Label-aware seeding
+
+Label-aware seeding builds several candidate transitions.
+Each candidate is propagated as in the [forward pass](prediction.md#the-single-forward-pass) and scored by the head's loss on the resulting affiliations.
+The candidate with the lowest loss is selected.
+
+- **`Coupling.M` with fewer target than source clusters:** a merge starts with each source cluster as its own group and joins, one pair at a time, the two groups that are cheapest to join, until $K_n$ groups remain. When the target is the last hidden block, two merges are built, one with a geometric tie-break. A tie goes to a merge. Eight more candidates group the source clusters by k-means++ over their feature-space centroids, weighted by cluster masses.
+- **`Coupling.S`:** eight candidates partition the observations by k-means++ in feature space.
 
 ### Heads
 
@@ -255,14 +272,26 @@ Classification heads start with the uniform matrix under their selected constrai
 ## Pruning
 
 Immediately after each affiliation update, fitting checks cluster $k$'s unweighted mass $\sum_t\Gamma_{tk}^{(n)}$ (without applying sample and instance weights).
-A mass at or below dtype machine precision is empty. 
+A cluster with mass at or below the smallest positive normal number is pruned.
+Hard affiliations give whole-number masses, so there pruning removes exactly the clusters no observation is assigned to.
+Soft affiliations are positive, so a cluster is pruned only once every observation's affiliation to it has underflowed.
 
 Removal drops the affiliation column and associated input geometry or head-parameter columns. An incoming hidden transition loses target rows, and an outgoing transition loses source columns. Renormalisation depends on the coupling.
 
 ## Convergence and stopping
 
-Every coordinate update minimises its part of the same objective, so an iteration can only decrease or preserve the loss up to numerical precision. Initialisation and update order can affect the solution reached because the joint problem need not be convex. Updates and loss evaluation use the same observation weights, strengths and floored logarithms.
+Every coordinate update minimises its part of the objective, so an iteration can only decrease or preserve the loss up to numerical precision (the decrease is monotonic).
+Initialisation and update order can affect the solution reached because the joint problem is not convex.
 
-`network.diagnostics.loss_history` stores the loss before the first iteration and after each complete iteration. Fitting stops when the relative change is at most `tol`, or after `max_iter` iterations. A rise exceeding $256\epsilon\max(1,|L_{\mathrm{previous}}|)$ emits a `LossIncreaseWarning`, where $\epsilon$ is dtype machine precision.
+`network.diagnostics.loss_history` stores the loss before the first iteration and after each complete iteration. Fitting stops after `max_iter` iterations, or after an iteration that meets
+
+$$
+|L-L_{\mathrm{previous}}|\le\texttt{tol}\cdot|L_{\mathrm{previous}}+C|.
+$$
+
+$C$ is the largest amount by which the entropy penalties together can lower the loss: $\varepsilon_T\log T$, $\varepsilon_D\log D$ and $\varepsilon_M\log M$ for learned weights, and $\varepsilon_n\log K_n$ for each soft clustering, with $K_n$ its current cluster count.
+Each negative entropy penalty $-cH(p)$ equals $c\mathrm{KL}(p\|\mathrm{uniform})-c\log n$, and the instance-weight penalty equals $\varepsilon_T\mathrm{KL}(W_T\|w)-\varepsilon_T\log T$, so measuring the change against $L_{\mathrm{previous}}+C$ keeps the test independent of the penalties' constant offsets.
+
+A rise exceeding $256\epsilon\max(1,|L_{\mathrm{previous}}|)$ emits a `LossIncreaseWarning`, where $\epsilon$ is dtype machine precision.
 
 Continue with [Predicting new observations](prediction.md) for inference with the learned parameters fixed.

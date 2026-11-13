@@ -14,7 +14,7 @@ from entlearn.network.blocks.affiliations import (
 from entlearn.network.connections import _ConnectionState
 from entlearn.network.state import _HiddenParameters
 from entlearn.network.transfer import copy_log, copy_tensor
-from entlearn.primitives.normalise import _is_soft
+from entlearn.primitives.normalise import _is_soft, _scratch_view
 from entlearn.recipe import Hidden
 
 if TYPE_CHECKING:
@@ -30,7 +30,6 @@ class _HiddenBlock:
     description: Hidden
     gamma: torch.Tensor
     incoming: dict[str, _ConnectionState]
-    soft_assignments: bool
 
     @classmethod
     def make_block(
@@ -41,6 +40,7 @@ class _HiddenBlock:
         K_source: int,
     ) -> _HiddenBlock:
         """Allocate one hidden block and its incoming transition."""
+        assert description.epsilon is not None
         state = _ConnectionState.allocate(
             connection,
             description.K,
@@ -50,7 +50,6 @@ class _HiddenBlock:
         )
         return cls(
             description=description,
-            soft_assignments=_is_soft(description.epsilon, data.X_cont.dtype),
             gamma=torch.empty(
                 data.X_cont.shape[0],
                 description.K,
@@ -67,8 +66,14 @@ class _HiddenBlock:
 
     @property
     def effective_epsilon(self) -> float:
-        """Return the affiliation temperature of the fitted regime: zero when hard."""
-        return self.description.epsilon if self.soft_assignments else 0.0
+        """Return the resolved affiliation temperature ``epsilon``."""
+        assert self.description.epsilon is not None
+        return self.description.epsilon
+
+    @property
+    def soft_assignments(self) -> bool:
+        """Whether the block uses softmax (positive ``epsilon``) or argmin (``epsilon=0``)."""
+        return _is_soft(self.effective_epsilon)
 
     def prune(self, keep: torch.Tensor) -> None:
         """Compact the affiliation columns to the surviving clusters."""
@@ -76,7 +81,8 @@ class _HiddenBlock:
         self.gamma = torch.index_select(self.gamma, 1, index)
 
     def initialise_(self, session: _FitSession) -> None:
-        """Propagate source affiliations through this block's existing incoming transition."""
+        """Assign starting affiliations by propagating the source through the incoming transition."""
+        session.graph.head.target_sums_fresh = False
         connection = session.graph.connection_into(self)
         gamma_source = session.graph.affiliations(connection.source)
         self.incoming[connection.name].propagate_(
@@ -121,7 +127,7 @@ class _HiddenBlock:
         workspace = session.workspace
         T = session.data.X_cont.shape[0]
         K = self.K
-        cost = workspace.matrix[:T, :K]
+        cost = _scratch_view(workspace.matrix, K, T)
         cost.zero_()
         for connection in graph.incoming[self.description.name]:
             self.incoming[connection.name].accumulate_into_target_cost_(
@@ -152,6 +158,6 @@ class _HiddenBlock:
         self.prune_(session)
         self.update_incoming_connections_(session)
 
-    def partial_loss_(self, session: _FitSession) -> None:
-        """Add this hidden block's affiliation entropy."""
-        affiliation_entropy_(self.gamma, self, session)
+    def partial_loss_(self, session: _FitSession) -> float:
+        """Add this hidden block's affiliation entropy; return its largest value."""
+        return affiliation_entropy_(self.gamma, self, session)

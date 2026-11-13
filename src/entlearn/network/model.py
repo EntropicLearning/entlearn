@@ -6,6 +6,7 @@ import logging
 import math
 import os
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from functools import partial
 from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any, Literal, Never, overload
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Never, overload
 import torch
 from torch import Tensor
 
+from entlearn.network.blocks.input import _resolve_delta_cat
 from entlearn.network.build import _build_recipe
 from entlearn.network.candidate import _fit_candidate, _fit_logger
 from entlearn.network.config import (
@@ -28,7 +30,7 @@ from entlearn.network.initialisation.capacity import validate_profile_capacity
 from entlearn.network.initialisation.capture import capture_current_state
 from entlearn.network.initialisation.geometry import (
     _prepare_initialisation,
-    _seed_initial_state,
+    _seed_initial_states,
 )
 from entlearn.network.initialisation.resolve_state import staging_hints
 from entlearn.network.initialisation.seeds import (
@@ -324,7 +326,8 @@ class Network:
                 A supplied state bypasses initialisation selection: validation pairs
                 and selection loss are ignored, and this state is fitted once on all rows.
             n_inits: Positive number of independent candidates. One uses the root seed
-                directly. Several candidates draw their sub-seeds before dispatch.
+                directly. Several candidates draw their sub-seeds and their initial states
+                together before dispatch.
             n_jobs: Joblib worker count; ``None`` and ``1`` run serially, ``-1`` uses
                 all CPUs available to joblib. One candidate never starts workers.
             parallel_backend: Threads or processes for several candidates. Processes
@@ -370,7 +373,8 @@ class Network:
             computation_dtype: Optional float32 or float64 computation dtype.
             predict_config: Complete prediction policy. Omission uses task defaults.
             max_iter: Maximum number of complete fit iterations.
-            tol: Non-negative relative convergence tolerance.
+            tol: Non-negative stopping tolerance for the loss change, relative to the
+                loss plus the largest magnitude of its entropy penalties.
             seed: Root initialisation seed: any non-boolean integral value in ``[0, 2**63)``.
             logger: Optional caller-configured logger. Its level, handlers and propagation
                 are never changed. Omission creates a private logger writing to stderr.
@@ -421,10 +425,18 @@ class Network:
             categorical_cardinalities=categorical_cardinalities,
             known_n_classes=known_n_classes,
         )
+        built = _build_recipe(_resolve_delta_cat(recipe, data))
         if initial_state is None:
             validate_profile_capacity(built, data.X_cont.shape[0])
         rows = None if init_rows is None else _row_indices(init_rows, data, "init_rows")
         folds = None if validation_pairs is None else _validation_folds(validation_pairs, data)
+        seeds = _plan_seeds(root, count, data.X_cont.device)
+        seeded: dict[int, InitialState] = {}
+        if initial_state is None:  # every candidate's input geometry is generated together
+            states = _seed_initial_states(
+                built, data, allow_conversion=computation_dtype is not None, seeds=seeds, rows=rows
+            )
+            seeded = dict(zip(seeds, states, strict=True))
         # Bind common fit inputs; selection supplies the seed, state, policy, logging and rows.
         fit_one = partial(
             _fit_candidate,
@@ -433,12 +445,12 @@ class Network:
             allow_conversion=computation_dtype is not None,
             max_iter=int(max_iter),
             tol=resolved_tol,
-            init_rows=rows,
+            seeded=seeded,
             provided=initial_state is not None,
         )
         record = _select_candidate(
             fit_one,
-            _plan_seeds(root, count, data.X_cont.device),
+            seeds,
             data=data,
             initial_state=initial_state,
             folds=folds,
@@ -565,7 +577,7 @@ class Network:
             max_iter: Positive total iteration ceiling per trajectory. ``None``
                 reuses the source fit's ceiling. A ceiling at or below the number
                 already completed takes no further steps.
-            tol: Non-negative relative-loss tolerance, also applied to retained history.
+            tol: Non-negative stopping tolerance, as for ``fit``, also applied to retained history.
                 ``None`` reuses the source fit's tolerance.
             logger: Optional caller-owned logger, never reconfigured.
             verbose: Non-negative logging verbosity, as for ``fit``.
@@ -626,14 +638,15 @@ class Network:
 
         Only shape-preserving hyperparameters may change:
         input temperatures and categorical cost scale or manifold alpha, hidden
-        epsilon, connection delta and theta_alpha, and regression epsilon_M
-        (or fixed W_M with the same number of targets).
+        epsilon, connection delta and theta_alpha, classification theta_alpha, and
+        regression epsilon_M (or fixed W_M with the same number of targets).
         Structure and initialisation controls must remain fixed.
 
         Feature and output weights transfer exactly. Infinite temperatures freeze
         their current values. Instance
         weights instead start from the new normalised sample weights, or uniform
-        weights when omitted, and infinite epsilon_T freezes those new values.
+        weights when omitted. Infinite epsilon_T freezes those new values, finite epsilon_T
+        learns instance weights relative to them.
 
         Derived prediction temperatures recalibrate; supplied ones stay
         fixed. The scoring reference rebuilds. Prediction-only models can fine-tune.
@@ -683,8 +696,8 @@ class Network:
         retained training values. Continuous centroids may have zero columns for
         categorical-only input.
         ``affiliation_regimes`` maps each input and hidden block to ``"hard"`` or ``"soft"``:
-        the regime its fit resolved from ``epsilon`` and the computation dtype, which
-        prediction keeps for any number of query rows.
+        ``epsilon = 0`` is hard and any positive value is soft, whatever the dtype and the
+        number of query rows.
 
         Raises:
             ValueError: If the name is unknown or unavailable for the fitted model.
@@ -692,10 +705,17 @@ class Network:
         return inspect(self._graph, name)
 
     def _query_config(self, predict_config: PredictConfig | None) -> PredictConfig:
-        """Return the fitted policy, or resolve a complete call-time replacement."""
+        """Return the fitted policy, or resolve a complete call-time replacement.
+
+        A geometric replacement without ``epsilon_P`` takes the fitted temperature. A
+        fitted arithmetic policy has none, so prediction falls back to ``delta``.
+        """
         if predict_config is None:
             return self.predict_config
-        return _resolve_predict_config(predict_config, self._graph.head.description)
+        config = _resolve_predict_config(predict_config, self._graph.head.description)
+        if config.output_mode == "geometric" and config.epsilon_P is None:
+            config = replace(config, epsilon_P=self.predict_config.epsilon_P)
+        return config
 
     @torch.inference_mode()
     def score_samples(
@@ -719,8 +739,8 @@ class Network:
         are not normalised over the query batch.
 
         Raises:
-            ValueError: Before prediction if the fit has no instance-weight recovery or
-                retained scoring reference, or if query data or policy is invalid.
+            ValueError: Before prediction if the fit has no instance-weight recovery, or
+                if query data or policy is invalid.
 
         Warns:
             UserWarning: If the reference has collapsed within its precision noise band.
@@ -747,6 +767,7 @@ class Network:
         are row-local, but convergence uses the mean batch objective, so other query
         rows may change the stopping iteration and thus the returned prediction.
         ``predict_config=None`` (including omission) uses the fitted policy.
+        A geometric override without ``epsilon_P`` keeps the fitted temperature.
 
         ``predict_init`` is the initial prediction used in iterative prediction, and defaults to starting from the geometric
         read-out. A non-boolean integer start is any integral value in ``[0, 2**63)``.
@@ -802,7 +823,8 @@ class Network:
         """Return raw predictions with shape ``(n_members, n_rows, n_outputs)``.
 
         Members retain candidate order. Omission of ``predict_config`` uses each member's
-        own fitted policy, while an override applies to every member.
+        own fitted policy, while an override applies to every member. An override
+        without ``epsilon_P`` keeps each member's own fitted temperature.
 
         Raises:
             ValueError: If members were not retained or query data or policy is invalid.
@@ -951,13 +973,13 @@ class Network:
             continuous_centroids is not None or categorical_centroids is not None
         ):
             raise ValueError("init_rows and supplied centroids are mutually exclusive")
-        return _seed_initial_state(
+        return _seed_initial_states(
             built,
             data,
             feature_weights=feature_weights,
             continuous_centroids=continuous_centroids,
             categorical_centroids=categorical_centroids,
             allow_conversion=computation_dtype is not None,
-            seed=resolved_seed,
+            seeds=(resolved_seed,),
             rows=rows,
-        )
+        )[0]

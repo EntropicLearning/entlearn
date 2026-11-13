@@ -16,17 +16,19 @@ from entlearn.network.blocks.input_common import (
     update_affiliations_,
     update_instance_weights_,
 )
-from entlearn.network.blocks.manifold_geometry import _ManifoldDistance, _SubspaceWorkspace
+from entlearn.network.blocks.manifold_geometry import _ManifoldDistance
 from entlearn.network.data import _StagedData
 from entlearn.network.state import InitialState, _input_width
 from entlearn.network.transfer import copy_tensor
 from entlearn.network.validation import (
     _FLOAT_DTYPES,
+    _all_finite,
     _validate_prediction_features,
     _validate_storage,
 )
 from entlearn.primitives.centroids import compute_gamma_wt_, update_euclidean_centroids_
-from entlearn.primitives.normalise import _eps, _is_soft
+from entlearn.primitives.manifold import SubspaceWorkspace, weighted_subspaces_
+from entlearn.primitives.normalise import _eps, _is_soft, _scratch_view
 from entlearn.recipe import ManifoldInput
 
 if TYPE_CHECKING:
@@ -40,39 +42,34 @@ _ORTHONORMALITY_GUARD = 32
 class _ManifoldCache:
     """Row-bound distances, weighted statistics, and reusable coordinate scratch.
 
-    Pruning compacts ``sqdist`` and ``disc_cost`` to active K. Other cluster-indexed
-    scratch retains its initial capacity K_max and is sliced to the active cluster count.
+    Pruning compacts ``disc_cost`` to active K. Other cluster-indexed scratch keeps the
+    size K_max staged for the fit, and steps read contiguous views of the active cluster
+    count.
     """
 
-    sqdist: torch.Tensor  # (T, K) unweighted metrised discretisation error
-    disc_cost: torch.Tensor  # (T, K) Wt-weighted error; adds coupling before Γ updates
+    disc_cost: torch.Tensor  # (T, K) metrised discretisation error, Wt not applied
     weighted_gamma: torch.Tensor  # (T, K_max) Γ ∘ Wt for centroid and projector updates
     centroid_numerator: torch.Tensor  # (K_max, D) (Γ∘Wt)ᵀX, the centroid numerator
-    instance_weight_cost: torch.Tensor  # (T,) per-instance error, the Wt assignment cost
+    instance_weight_cost: torch.Tensor  # (T,) Wt cost: row error with epsilon_T·log(T·w) subtracted
     scratch_one: torch.Tensor  # (1,) Wt assignment reduction scratch
     scratch_index: torch.Tensor  # (1,) int64 argmin scratch for hard Wt assignment
     distance: _ManifoldDistance  # Reusable buffers for metrised distance assembly
-    subspace: _SubspaceWorkspace  # One cluster's covariance/SVD scratch for projectors
-    categorical_cost: None = None  # Absent categorical term in the shared Wt calculation
+    subspace: SubspaceWorkspace  # Covariance or Gram scratch for the projectors
 
     @classmethod
-    def allocate(
-        cls, X: torch.Tensor, K: int, d: int, *, capacity: int | None = None
-    ) -> _ManifoldCache:
+    def allocate(cls, X: torch.Tensor, K: int, d: int) -> _ManifoldCache:
         """Allocate the buffers once for this fit's rows and initial cluster count."""
         T, D = X.shape
-        K_max = K if capacity is None else capacity
         dtype, device = X.dtype, X.device
         return cls(
-            sqdist=torch.empty(T, K, dtype=dtype, device=device),
             disc_cost=torch.empty(T, K, dtype=dtype, device=device),
-            weighted_gamma=torch.empty(T, K_max, dtype=dtype, device=device),
-            centroid_numerator=torch.empty(K_max, D, dtype=dtype, device=device),
+            weighted_gamma=torch.empty(T, K, dtype=dtype, device=device),
+            centroid_numerator=torch.empty(K, D, dtype=dtype, device=device),
             instance_weight_cost=torch.empty(T, dtype=dtype, device=device),
             scratch_one=torch.empty(1, dtype=dtype, device=device),
             scratch_index=torch.empty(1, dtype=torch.int64, device=X.device),
-            distance=_ManifoldDistance.allocate(X, K_max, d),
-            subspace=_SubspaceWorkspace.allocate(X, d),
+            distance=_ManifoldDistance.allocate(X, K, d),
+            subspace=SubspaceWorkspace.allocate(X, K, d),
         )
 
 
@@ -106,7 +103,7 @@ def stage_projectors(
     if value.dtype != centroids.dtype and not allow_conversion:
         raise ValueError("manifold_projectors must use the computation dtype")
     projectors = value.to(dtype=centroids.dtype).detach().clone()
-    if not bool(torch.isfinite(projectors).all()):
+    if not _all_finite(projectors):
         raise ValueError("manifold_projectors must be finite")
     gram = projectors.transpose(1, 2) @ projectors
     identity = torch.eye(d, dtype=projectors.dtype, device=projectors.device).expand_as(gram)
@@ -130,7 +127,7 @@ class _ManifoldInputBlock:
     gamma: torch.Tensor
     instance_weights: torch.Tensor
     log_partition: torch.Tensor
-    soft_assignments: bool
+    partition_shift: torch.Tensor
     cache: _ManifoldCache | None = field(default=None, repr=False)
 
     @property
@@ -140,8 +137,13 @@ class _ManifoldInputBlock:
 
     @property
     def effective_epsilon(self) -> float:
-        """Return the affiliation temperature of the fitted regime: zero when hard."""
-        return self.description.epsilon if self.soft_assignments else 0.0
+        """Return the affiliation temperature ``epsilon``."""
+        return self.description.epsilon
+
+    @property
+    def soft_assignments(self) -> bool:
+        """Whether the block uses softmax (positive ``epsilon``) or argmin (``epsilon=0``)."""
+        return _is_soft(self.description.epsilon)
 
     @property
     def live_cache(self) -> _ManifoldCache:
@@ -174,16 +176,15 @@ class _ManifoldInputBlock:
             gamma=torch.empty(T, K, dtype=centroids.dtype, device=centroids.device),
             instance_weights=data.sample_weights.detach().clone(),
             log_partition=torch.full((), torch.inf, dtype=centroids.dtype, device=centroids.device),
-            soft_assignments=_is_soft(description.epsilon, centroids.dtype),
+            partition_shift=torch.full(
+                (), torch.inf, dtype=centroids.dtype, device=centroids.device
+            ),
         )
 
-    def stage_cache_(self, data: _StagedData, *, capacity: int | None = None) -> None:
-        """Allocate this fit's cache, its cluster scratch sized for ``capacity`` clusters.
-
-        ``capacity=None`` sizes the scratch for the active clusters.
-        """
+    def stage_cache_(self, data: _StagedData) -> None:
+        """Allocate this fit's cache, its cluster scratch sized for the active clusters."""
         self.cache = _ManifoldCache.allocate(
-            data.X_cont, self.K, self.description.subspace_dimension, capacity=capacity
+            data.X_cont, self.K, self.description.subspace_dimension
         )
 
     def release_cache(self) -> None:
@@ -197,7 +198,9 @@ class _ManifoldInputBlock:
 
         See ``copy_input_rows`` for the rows. The copy holds no cache.
         """
-        gamma, instance_weights, log_partition = copy_input_rows(self, dtype, device, row_weights)
+        gamma, instance_weights, log_partition, shift = copy_input_rows(
+            self, dtype, device, row_weights
+        )
         return replace(
             self,
             continuous_centroids=copy_tensor(self.continuous_centroids, dtype, device),
@@ -205,6 +208,7 @@ class _ManifoldInputBlock:
             gamma=gamma,
             instance_weights=instance_weights,
             log_partition=log_partition,
+            partition_shift=shift,
             cache=None,
         )
 
@@ -238,7 +242,6 @@ class _ManifoldInputBlock:
 
     def update_parameters_(self, session: _FitSession) -> None:
         """Update affiliations, prune, then update weights, centroids and projectors."""
-        session.graph.accumulate_outgoing_cost_(self, self.live_cache.disc_cost, session)
         update_affiliations_(self, session)
         prune_(self, session)
         update_instance_weights_(self, session)
@@ -252,27 +255,26 @@ class _ManifoldInputBlock:
         self.gamma = self.gamma.index_select(1, index)
         self.continuous_centroids = self.continuous_centroids.index_select(0, index)
         self.manifold_projectors = self.manifold_projectors.index_select(0, index)
-        cache = self.live_cache
-        cache.sqdist = cache.sqdist.index_select(1, index)
-        cache.disc_cost = cache.disc_cost.index_select(1, index)
+        self.live_cache.disc_cost = self.live_cache.disc_cost.index_select(1, index)
 
-    def partial_loss_(self, session: _FitSession) -> None:
-        """Add metrised discretisation error and affiliation and instance-weight entropies to the session loss."""
-        discretisation_loss_(self, session)
-        instance_weight_loss_(self, session)
+    def partial_loss_(self, session: _FitSession) -> float:
+        """Add metrised discretisation error and affiliation and instance-weight entropies to the session loss.
+
+        Returns the largest magnitude of its entropy penalties, ``Σ c log n``.
+        """
+        return discretisation_loss_(self, session) + instance_weight_loss_(self, session)
 
 
 def refresh_cache_(block: _ManifoldInputBlock, session: _FitSession) -> None:
-    """Refresh the distances and their instance-weighted contribution."""
+    """Refresh the metrised distances."""
     cache = block.live_cache
     cache.distance.assemble_(
-        cache.sqdist,
+        cache.disc_cost,
         session.data.X_cont,
         block.continuous_centroids,
         block.manifold_projectors,
         block.description.alpha,
     )
-    torch.mul(cache.sqdist, block.instance_weights[:, None], out=cache.disc_cost)
 
 
 def update_centroids_(block: _ManifoldInputBlock, session: _FitSession) -> None:
@@ -280,12 +282,16 @@ def update_centroids_(block: _ManifoldInputBlock, session: _FitSession) -> None:
     cache = block.live_cache
     K = block.K
     compute_gamma_wt_(
-        cache.weighted_gamma[:, :K],
+        _scratch_view(cache.weighted_gamma, K),
         session.workspace.scratch_K[:K],
         block.gamma,
         block.instance_weights,
     )
-    torch.mm(cache.weighted_gamma[:, :K].t(), session.data.X_cont, out=cache.centroid_numerator[:K])
+    torch.mm(
+        _scratch_view(cache.weighted_gamma, K).t(),
+        session.data.X_cont,
+        out=cache.centroid_numerator[:K],
+    )
     update_euclidean_centroids_(
         block.continuous_centroids,
         cache.centroid_numerator[:K],
@@ -295,17 +301,15 @@ def update_centroids_(block: _ManifoldInputBlock, session: _FitSession) -> None:
 
 
 def update_projectors_(block: _ManifoldInputBlock, session: _FitSession) -> None:
-    """Update local subspaces about the fresh centroids, skipping the Wt-weighted empty ones.
+    """Update local subspaces about the fresh centroids, keeping the Wt-weighted empty ones.
 
     Reads the empty mask and the weighted affiliations that ``update_centroids_`` leaves.
     """
-    cache = block.live_cache
-    empty = session.workspace.empty_clusters[: block.K].tolist()
-    for index in range(block.K):
-        if not empty[index]:
-            cache.subspace.write_(
-                session.data.X_cont,
-                block.continuous_centroids[index],
-                cache.weighted_gamma[:, index],
-                block.manifold_projectors[index],
-            )
+    weighted_subspaces_(
+        session.data.X_cont,
+        block.continuous_centroids,
+        _scratch_view(block.live_cache.weighted_gamma, block.K),
+        session.workspace.empty_clusters[: block.K],
+        out=block.manifold_projectors,
+        workspace=block.live_cache.subspace,
+    )

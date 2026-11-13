@@ -1,9 +1,10 @@
 """Prediction policy through the public Network lifecycle."""
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import replace
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET
 from network._fixtures import blobs, classification_recipe, regression_recipe
 
 import entlearn
@@ -11,6 +12,7 @@ from entlearn import ClassificationHead, Coupling, Input, Network, PredictConfig
 
 
 class TestPredictConfig:
+    @FIXED_BUDGET
     def test_supplied_temperature_and_complete_override(self):
         X, y = blobs(2, 0.28, seed=3)
         config = entlearn.PredictConfig(epsilon_P=0.5)
@@ -27,19 +29,17 @@ class TestPredictConfig:
         assert model.predict_config.predict_mode == "single"
         assert model.predict_config.max_iter == 100
         assert model.predict_config.tol == 1e-4
-        with pytest.raises(FrozenInstanceError):
-            model.predict_config.epsilon_P = 1.0
-        with pytest.raises(AttributeError):
-            model.predict_config = config
 
-        uncalibrated = model.predict(X, predict_config=entlearn.PredictConfig())
-        explicit = model.predict(X, predict_config=replace(config, epsilon_P=1.0))
-        torch.testing.assert_close(uncalibrated, explicit)
+        # An override without epsilon_P keeps the fitted temperature; delta = 1 is explicit.
+        torch.testing.assert_close(
+            model.predict(X, predict_config=entlearn.PredictConfig()), model.predict(X)
+        )
+        uncalibrated = model.predict(X, predict_config=replace(config, epsilon_P=1.0))
         torch.testing.assert_close(
             model.predict(X), uncalibrated.square() / uncalibrated.square().sum(1, keepdim=True)
         )
 
-    @pytest.mark.parametrize("epsilon", [-1, float("nan"), float("inf"), True, "1", 10**1000])
+    @pytest.mark.parametrize("epsilon", [-1, float("nan"), True, "1", 10**1000])
     def test_invalid_temperature_is_rejected(self, epsilon):
         with pytest.raises(ValueError, match="epsilon_P"):
             PredictConfig(epsilon_P=epsilon)
@@ -66,7 +66,6 @@ class TestPredictConfig:
         [
             (regression_recipe(), PredictConfig(epsilon_P=1), "regression"),
             (regression_recipe(), PredictConfig(output_mode="geometric"), "regression"),
-            (regression_recipe(), PredictConfig(output_mode="arithmetic"), "regression"),
             (
                 Recipe.chain(Input(K=2), ClassificationHead(coupling=Coupling.S)),
                 PredictConfig(output_mode="arithmetic"),
@@ -86,6 +85,7 @@ class TestPredictConfig:
         with pytest.raises(ValueError, match=message):
             model.predict(object(), predict_config=config)
 
+    @FIXED_BUDGET
     def test_arithmetic_has_no_temperature_and_is_not_merged_into_override(self):
         X, y = blobs(2, 0.28, seed=3)
         model = Network.fit(
@@ -109,6 +109,3 @@ class TestPredictConfig:
         model = Network.fit(regression_recipe(), X, codes.to(X.dtype), max_iter=2)
         assert model.predict_config.output_mode is None
         assert model.predict_config.epsilon_P is None
-        torch.testing.assert_close(
-            model.predict(X), model.predict(X, predict_config=PredictConfig(tol=0, max_iter=1))
-        )

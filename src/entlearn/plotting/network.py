@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _Panel = tuple[str, str, Callable[[go.Figure, int, int], object]]
 
 
-def _panels(
+def _panels(  # noqa: C901
     network: Network,
     description: Input | ManifoldInput | Hidden | ClassificationHead | RegressionHead,
     X: torch.Tensor | None,

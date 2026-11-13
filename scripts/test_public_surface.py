@@ -1,5 +1,7 @@
 """The public import surface of the package."""
 
+from dataclasses import fields
+
 import entlearn
 
 # The lifecycle objects, then the vocabulary a Recipe is written in. Extend this list
@@ -46,10 +48,53 @@ class TestPublicSurface:
         assert entlearn.InputBlock == entlearn.Input | entlearn.ManifoldInput
         assert entlearn.Head == entlearn.ClassificationHead | entlearn.RegressionHead
 
+    def test_recipe_descriptions_hold_exactly_the_intended_fields(self):
+        # A new field must be classified as replaceable or structural in fine_tune.
+        expected = {
+            entlearn.Input: {
+                "K",
+                "epsilon",
+                "epsilon_D",
+                "epsilon_T",
+                "delta_cat",
+                "W_std",
+                "centroid_strategy",
+                "greedy_candidates",
+                "balanced",
+                "name",
+            },
+            entlearn.ManifoldInput: {
+                "K",
+                "epsilon",
+                "epsilon_T",
+                "alpha",
+                "subspace_dimension",
+                "centroid_strategy",
+                "greedy_candidates",
+                "balanced",
+                "name",
+            },
+            entlearn.Hidden: {"K", "epsilon", "epsilon_ratio", "name"},
+            entlearn.ClassificationHead: {"coupling", "n_classes", "theta_alpha", "name"},
+            entlearn.RegressionHead: {"epsilon_M", "W_M", "name"},
+            entlearn.Connection: {
+                "name",
+                "source",
+                "target",
+                "delta",
+                "delta_ratio",
+                "coupling",
+                "theta_alpha",
+            },
+            entlearn.Recipe: {"blocks", "connections"},
+        }
+        for kind, names in expected.items():
+            assert {field.name for field in fields(kind)} == names
+
     def test_helper_namespace_lists_exactly_the_intended_names(self):
         from entlearn import helpers
 
-        expected = {"feature_weights", "reporting"}
+        expected = {"delta_cat_guess", "feature_weights", "reporting"}
         assert set(helpers.__all__) == expected
         assert helpers.__all__ == sorted(expected)
         for name in helpers.__all__:

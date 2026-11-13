@@ -61,6 +61,7 @@ coverage.xml
 
 # MkDocs build output
 site/
+docs_site/tutorials/notebooks/
 
 # Local CLAUDE.md
 CLAUDE.local.md
@@ -78,6 +79,7 @@ examples/ledgers/
 
 # Mutation-testing and coverage working files (the /harden pass)
 mutants/
+.scratch/
 mutmut-stats.json
 .coverage
 coverage.json

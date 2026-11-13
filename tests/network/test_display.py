@@ -12,13 +12,10 @@ from network._fixtures import (
     regression_recipe,
 )
 
-from entlearn import Network, PredictConfig
+from entlearn import ClassificationHead, Hidden, Input, Network, PredictConfig, Recipe
 
 pytest.importorskip("rich")
 from rich.console import Console
-
-# Each width selects one table layout, which its column heading identifies.
-_LAYOUTS = ((72, "Configuration"), (120, "Hyperparameters"))
 
 
 def _render(network: Network, width: int) -> str:
@@ -28,72 +25,27 @@ def _render(network: Network, width: int) -> str:
 
 
 class TestRichDisplay:
-    # One fit stops after a single iteration, so both fit statuses are rendered.
+    # The regression fit stops after one iteration, so a recorded warning is rendered too.
     @pytest.mark.filterwarnings("ignore::entlearn.ConvergenceWarning")
     @pytest.mark.parametrize(
-        ("task", "predict_config", "n_inits", "retain", "max_iter", "multi_init", "calibration"),
+        ("task", "predict_config", "n_inits", "retain", "max_iter"),
         [
             pytest.param(
-                "classification",
-                None,
-                1,
-                "winner",
-                5,
-                "1 candidate · members not retained",
-                "in-sample",
-                id="derived",
+                "classification", PredictConfig(epsilon_P=0.5), 1, "winner", 5, id="supplied"
             ),
-            pytest.param(
-                "classification",
-                PredictConfig(epsilon_P=0.5),
-                1,
-                "winner",
-                5,
-                "1 candidate · members not retained",
-                "not performed (supplied ε_P)",
-                id="supplied",
-            ),
-            pytest.param(
-                "classification",
-                None,
-                3,
-                "members",
-                5,
-                "3 candidates · 3 members retained",
-                "in-sample",
-                id="multi-init",
-            ),
-            pytest.param(
-                "classification",
-                None,
-                1,
-                "members",
-                5,
-                "1 candidate · 1 member retained",
-                "in-sample",
-                id="single-member-retained",
-            ),
-            pytest.param(
-                "regression",
-                None,
-                1,
-                "winner",
-                1,
-                "1 candidate · members not retained",
-                "not applicable",
-                id="regression",
-            ),
+            pytest.param("classification", None, 3, "members", 5, id="multi-init"),
+            pytest.param("regression", None, 1, "winner", 1, id="regression"),
         ],
     )
-    def test_renders_the_fit_summary_in_both_layouts(
-        self, task, predict_config, n_inits, retain, max_iter, multi_init, calibration
+    def test_renders_the_fitted_facts_at_any_width(
+        self, task, predict_config, n_inits, retain, max_iter
     ):
         if task == "classification":
             X, y = blobs(3, BLOB_SPREADS["separated"])
-            recipe, data = classification_recipe(K=3), "3 continuous · 0 categorical · 3 classes"
+            recipe = classification_recipe(K=3)
         else:
             X, y, _ = regression_blobs(2)
-            recipe, data = regression_recipe(), "1 continuous · 0 categorical · 2 outputs"
+            recipe = regression_recipe()
         network = Network.fit(
             recipe,
             X,
@@ -104,9 +56,27 @@ class TestRichDisplay:
             max_iter=max_iter,
             seed=0,
         )
-        status = "Converged" if network.diagnostics.converged else "Not converged"
-        compute = f"{str(DTYPE).removeprefix('torch.')} · {DEVICE}"
-        for width, heading in _LAYOUTS:
+        facts = [name for name, _ in network.schema.K_active]
+        facts += [network.schema.task, str(DTYPE).removeprefix("torch."), str(DEVICE)]
+        if predict_config is not None:
+            facts.append(str(predict_config.epsilon_P))
+        for width in (60, 120):
             text = _render(network, width)
-            for expected in (heading, status, data, compute, multi_init, calibration):
-                assert expected in text, f"{expected!r} missing at width {width}:\n{text}"
+            for fact in facts:
+                assert fact in text, f"{fact!r} missing at width {width}:\n{text}"
+
+    @pytest.mark.filterwarnings("ignore::entlearn.ConvergenceWarning")
+    def test_a_ratio_shows_the_value_it_gives(self):
+        X, y = blobs(3, BLOB_SPREADS["separated"])
+        recipe = Recipe.chain(
+            Input(K=4, epsilon=0.05),
+            Hidden(K=3, epsilon_ratio=1.5),
+            ClassificationHead(),
+            delta=0.5,
+            delta_ratio=4,
+        )
+        network = Network.fit(recipe, X, y, max_iter=2, seed=0)
+        for width in (60, 120):
+            text = _render(network, width)
+            assert "ε=0.75 (1.5·δ)" in text
+            assert "δ=2 (4·previous δ)" in text

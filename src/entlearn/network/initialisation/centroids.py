@@ -3,90 +3,104 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 
 from entlearn._warnings import _warn
 from entlearn.network.initialisation.balanced import allocate_balanced_seeds
-from entlearn.network.validation import _FLOAT_DTYPES, _validate_storage
-from entlearn.primitives.dissimilarity import seed_dissimilarity
-from entlearn.primitives.normalise import _eps
+from entlearn.network.validation import _FLOAT_DTYPES, _all_finite, _validate_storage
+from entlearn.primitives.distance import dissimilarity_to_rows
+
+# On CUDA, rows with at most _ROW_SCAN_LIMIT weights use a direct cumulative sum,
+# avoiding extra kernel launches. Rows with more weights use the square-based scan.
+_ROW_SCAN_LIMIT = 2**15
 
 
-def _weighted_choice(weights: torch.Tensor, generator: torch.Generator, n: int = 1) -> torch.Tensor:
-    """Draw ``n`` indices with probability proportional to ``weights``, with replacement.
+def _cumsum_rows(weights: torch.Tensor) -> torch.Tensor:
+    """Return repeatable cumulative sums for non-negative ``(B, T)`` weights.
 
-    An exact inverse-CDF draw: a uniform in ``[0, 1)`` is scaled by the cumulative total
-    and located by ``searchsorted``, so a zero-weight entry cannot be selected. At least
-    one weight must be positive.
+    Each row's sums never decrease and stay unchanged at zero-weight entries.
+    On CPU, use the usual row-wise cumulative sum. On CUDA, scan at least two rows
+    together to avoid the non-repeatable single-row kernel. For rows with more than
+    ``_ROW_SCAN_LIMIT`` weights, reshape each into a padded square, scan its rows,
+    then add the cumulative row totals.
     """
-    cumulative = torch.cumsum(weights, dim=0)
-    total = cumulative[-1]
-    draw = torch.rand(n, generator=generator, device=weights.device, dtype=weights.dtype)
+    B, T = weights.shape
+    if weights.device.type == "cpu":
+        return weights.cumsum(dim=1)
+    if T <= _ROW_SCAN_LIMIT:  # CUDA sums multiple rows in a fixed order.
+        return (weights.expand(2, -1) if B == 1 else weights).cumsum(dim=1)[:B]
+    side = math.isqrt(T - 1) + 1
+    square = weights.new_zeros(B, side * side)
+    square[:, :T] = weights
+    square = square.view(B, side, side)
+    rows = square.cumsum(dim=2)
+    rows[:, 1:] += _cumsum_rows(rows[:, :, -1])[:, :-1, None]
+    # Separately computed row offsets can round below the previous row's final sum.
+    # Running maxima prevent decreases within and between rows. Reset zero-weight
+    # entries first so they inherit the preceding sum rather than a rounding error.
+    rows = torch.where(square > 0, rows, 0).cummax(dim=2).values
+    ends = rows[:, :, -1].cummax(dim=1).values  # Maxima do not depend on summation order.
+    torch.maximum(rows[:, 1:], ends[:, :-1, None], out=rows[:, 1:])
+    return rows.view(B, -1)[:, :T].contiguous()
+
+
+def _weighted_draws(
+    weights: torch.Tensor, generators: Sequence[torch.Generator], n: int
+) -> torch.Tensor:
+    """Draw ``n`` indices with replacement from each row of ``(B, T)`` weights.
+
+    Selection probabilities are proportional to the weights, with at least one positive
+    weight required per row. Row ``b`` uses ``generators[b]`` to draw uniform values
+    and locate them in its cumulative weights. Return ``(B, n)`` indices, never
+    selecting a zero-weight entry.
+    """
+    cumulative = _cumsum_rows(weights)
+    total = cumulative[:, -1:].contiguous()
+    uniform = weights.new_empty(len(generators), n)
+    for row, generator in zip(uniform, generators, strict=True):
+        torch.rand(n, generator=generator, out=row)
     last_weighted = torch.searchsorted(cumulative, total)
-    return torch.searchsorted(cumulative, draw * total, right=True).clamp_(max=last_weighted)
-
-
-def _uniform_unchosen_pick(
-    chosen: torch.Tensor,
-    count: int,
-    n_rows: int,
-    generator: torch.Generator,
-    dtype: torch.dtype,
-) -> int:
-    """Pick one not-yet-chosen row uniformly at random.
-
-    The fallback for a degenerate weighted draw: when no remaining candidate carries
-    positive probability, every unchosen row becomes equally likely.
-    """
-    mask = torch.ones(n_rows, dtype=torch.bool, device=chosen.device)
-    mask[chosen[:count]] = False
-    remaining = mask.nonzero(as_tuple=True)[0]
-    pick = int(
-        torch.multinomial(
-            torch.ones(remaining.numel(), dtype=dtype, device=chosen.device), 1, generator=generator
-        ).item()
-    )
-    return int(remaining[pick].item())
+    return torch.searchsorted(cumulative, uniform.mul_(total), right=True).clamp_(max=last_weighted)
 
 
 def _greedy_candidate(
-    X: torch.Tensor,
-    X_cat: list[torch.Tensor],
-    logX_cat: list[torch.Tensor],
-    Wd_cont: torch.Tensor,
-    Wd_cat: torch.Tensor,
+    dissimilarity: Callable[[torch.Tensor], torch.Tensor],
     sample_weights: torch.Tensor,
     d2: torch.Tensor,
     candidates: torch.Tensor,
-) -> int:
-    """Return the candidate minimising the k-means++ potential, the first wins a tie."""
-    best_potential = math.inf
-    best = int(candidates[0].item())
-    for candidate in candidates.tolist():
-        d2_candidate = torch.minimum(
-            d2, seed_dissimilarity(X, X_cat, logX_cat, Wd_cont, Wd_cat, candidate)
-        )
-        potential = float((sample_weights * d2_candidate).sum())
-        if potential < best_potential:
-            best_potential = potential
-            best = candidate
-    return best
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Choose the candidate seed with the lowest k-means++ potential for each initialisation.
+
+    Each of the ``B`` rows of ``candidates`` holds the proposed seeds for one
+    initialisation. The first candidate wins ties. Return the selected row indices
+    with shape ``(B, 1)``, the updated nearest-seed dissimilarities ``(B, T)``,
+    and the dissimilarities to the winning candidate alone, also ``(B, T)``.
+    """
+    B, T = d2.shape
+    priced = dissimilarity(candidates.view(-1)).view(T, B, -1)
+    scored = torch.minimum(priced, d2.T.unsqueeze(2))
+    best = (sample_weights @ scored.view(T, -1)).view(B, -1).argmin(dim=1, keepdim=True)
+    index = best.view(1, B, 1).expand(T, B, 1)
+    nearest = scored.gather(2, index).view(T, B)
+    column = priced.gather(2, index).view(T, B)
+    return candidates.gather(1, best), nearest.T.contiguous(), column.T.contiguous()
 
 
-def select_kmeanspp_seeds(
+def select_kmeanspp_seeds_(
+    columns: torch.Tensor | None,
     X: torch.Tensor,
     X_cat: list[torch.Tensor],
     K: int,
-    generator: torch.Generator,
+    generators: Sequence[torch.Generator],
     Wd_cont: torch.Tensor,
     Wd_cat: torch.Tensor,
     sample_weights: torch.Tensor,
     *,
     n_candidates: int = 1,
 ) -> torch.Tensor:
-    """Return ``K`` distinct row indices chosen by weighted k-means++ over both modalities.
+    """Return ``K`` distinct row indices per generator, chosen by weighted k-means++ over both modalities.
 
     The first seed is drawn proportionally to ``sample_weights``. Each later seed is drawn
     proportionally to ``sample_weights[t] * D^2(t)``, the feature-weighted dissimilarity
@@ -96,49 +110,81 @@ def select_kmeanspp_seeds(
     candidates and keeps the one minimising the potential
     ``sum_t sample_weights[t] * min_c D^2(t, c)``.
 
+    Each generator draws a separate set of seeds. All sets share one dissimilarity
+    matrix product per round. Results repeat for the same inputs and generator states,
+    but changing the batch size can change floating-point rounding and hence the seeds.
+
     Args:
+        columns: ``(len(generators), T, K)`` output (modified): column ``k`` of each
+            initialisation receives every row's dissimilarity to its seed ``k``.
+            ``None`` skips it.
         X: ``(T, D_cont)`` continuous data.
-        X_cat: Per-feature ``(T, M_i)`` categorical distributions; empty when there is
-            no categorical modality.
+        X_cat: Per-feature ``(T, M_i)`` categorical distributions or ``(T,)`` integer
+            codes; empty when there is no categorical modality.
         K: Number of seeds to select; at most ``T``.
-        generator: Generator driving the draws.
+        generators: Generators driving the draws, one per set of seeds.
         Wd_cont: ``(D_cont,)`` continuous feature weights.
         Wd_cat: ``(D_cat,)`` categorical feature weights.
         sample_weights: ``(T,)`` per-instance weights.
         n_candidates: Candidate draws per seed; ``1`` is plain k-means++.
 
     Returns:
-        ``(K,)`` int64 row indices, distinct by construction.
+        ``(len(generators), K)`` int64 row indices, with no repeated index within a row.
     """
-    log_eps = _eps(X.dtype)
-    logX_cat = [rows.clamp_min(log_eps).log() for rows in X_cat]
-    chosen = torch.empty(K, dtype=torch.int64, device=X.device)
-    first = int(_weighted_choice(sample_weights, generator).item())
-    chosen[0] = first
-    d2 = seed_dissimilarity(X, X_cat, logX_cat, Wd_cont, Wd_cat, first)
+    dissimilarity = dissimilarity_to_rows(X, X_cat, Wd_cont, Wd_cat)
+    chosen = [_weighted_draws(sample_weights.expand(len(generators), -1), generators, 1)]
+    d2 = dissimilarity(chosen[0].view(-1)).T.contiguous()
+    if columns is not None:
+        columns[:, :, 0] = d2
+    unchosen = torch.ones_like(d2).scatter_(1, chosen[0], 0.0)
     for count in range(1, K):
-        probabilities = sample_weights * d2
-        probabilities[chosen[:count]] = 0.0
-        if bool(probabilities.sum() > 0):
-            candidates = _weighted_choice(probabilities, generator, n_candidates)
-            if n_candidates == 1:
-                nxt = int(candidates.item())
-            else:
-                nxt = _greedy_candidate(
-                    X, X_cat, logX_cat, Wd_cont, Wd_cat, sample_weights, d2, candidates
-                )
+        probabilities = sample_weights * d2 * unchosen
+        has_mass = probabilities.any(dim=1, keepdim=True)
+        candidates = _weighted_draws(
+            torch.where(has_mass, probabilities, unchosen), generators, n_candidates
+        )
+        if n_candidates == 1:
+            column = dissimilarity(candidates.view(-1)).T
+            torch.minimum(d2, column, out=d2)
         else:
-            nxt = _uniform_unchosen_pick(chosen, count, X.shape[0], generator, X.dtype)
-        chosen[count] = nxt
-        d2 = torch.minimum(d2, seed_dissimilarity(X, X_cat, logX_cat, Wd_cont, Wd_cat, nxt))
-    return chosen
+            candidates, d2, column = _greedy_candidate(
+                dissimilarity, sample_weights, d2, candidates
+            )
+        if columns is not None:
+            columns[:, :, count] = column
+        unchosen.scatter_(1, candidates, 0.0)
+        chosen.append(candidates)
+    return torch.cat(chosen, dim=1)
+
+
+def cap_input_clusters_to_eligible_rows(K: int, labelled: torch.Tensor, *, balanced: bool) -> int:
+    """Limit the input cluster count to the number of rows available for centroid seeding.
+
+    Each centroid needs a distinct row. All staged rows are eligible unless ``balanced``
+    is true, in which case only rows marked in ``labelled`` are eligible.
+    Return the smaller of ``K`` and the eligible count, warning if ``K`` is reduced.
+    Raise ``ValueError`` if no row is eligible.
+
+    Call once before seeding any initialisations so a fit emits at most one cap warning.
+    """
+    available = int(labelled.sum()) if balanced else labelled.numel()
+    if available == 0:
+        raise ValueError("input initialisation requires at least one eligible row")
+    if available < K:
+        _warn(
+            f"input K={K} exceeds {available} eligible rows "
+            f"from {labelled.numel()} samples; reducing the initial input cluster count to "
+            f"{available}",
+            UserWarning,
+        )
+    return min(K, available)
 
 
 def select_centroid_seeds(
     X: torch.Tensor,
     X_cat: list[torch.Tensor],
     K: int,
-    generator: torch.Generator,
+    generators: Sequence[torch.Generator],
     Wd_cont: torch.Tensor,
     Wd_cat: torch.Tensor,
     sample_weights: torch.Tensor,
@@ -148,47 +194,44 @@ def select_centroid_seeds(
     balanced: bool,
     n_candidates: int | None,
 ) -> torch.Tensor:
-    """Select distinct eligible rows, warning when the requested count is reduced.
+    """Select ``K`` distinct rows per generator, from the labelled rows when ``balanced``.
 
-    Balanced selection uses only labelled rows. ``n_candidates=None`` selects the greedy
-    default from the feasible, rather than requested, cluster count.
+    The caller must cap ``K`` at the eligible row count before calling.
+    ``n_candidates=None`` uses the greedy default of ``2 + floor(log(K))``.
     """
-    eligible = labelled if balanced else torch.ones_like(labelled)
-    eligible_rows = eligible.nonzero(as_tuple=True)[0]
-    available = eligible_rows.numel()
-    if available == 0:
-        raise ValueError("input initialisation requires at least one eligible row")
-    if available < K:
-        _warn(
-            f"input K={K} exceeds {available} eligible rows "
-            f"from {X.shape[0]} samples; reducing the initial input cluster count to {available}",
-            UserWarning,
-        )
-        K = available
     if n_candidates is None:
         n_candidates = 2 + math.floor(math.log(K))
-    if balanced:
-        labels = target.argmax(dim=1)
-        allocation = allocate_balanced_seeds(labels, eligible, sample_weights, K)
-        pools = tuple((eligible & (labels == code), count) for code, count in allocation)
-    else:
-        pools = ((eligible, K),)
-
+    if not balanced:  # every row is eligible
+        return select_kmeanspp_seeds_(
+            None,
+            X,
+            X_cat,
+            K,
+            generators,
+            Wd_cont,
+            Wd_cat,
+            sample_weights,
+            n_candidates=n_candidates,
+        )
+    labels = target.argmax(dim=1)
+    allocation = allocate_balanced_seeds(labels, labelled, sample_weights, K)
     selected_pools = []
-    for pool, count in pools:
+    for code, count in allocation:
+        pool = labelled & (labels == code)
         pool_rows = pool.nonzero(as_tuple=True)[0]
-        selected = select_kmeanspp_seeds(
+        selected = select_kmeanspp_seeds_(
+            None,
             X[pool],
             [feature[pool] for feature in X_cat],
             count,
-            generator,
+            generators,
             Wd_cont,
             Wd_cat,
             sample_weights[pool],
             n_candidates=n_candidates,
         )
         selected_pools.append(pool_rows[selected])
-    return torch.cat(selected_pools)
+    return torch.cat(selected_pools, dim=1)
 
 
 def _staged_centroids(
@@ -211,7 +254,7 @@ def _staged_centroids(
     if not allow_conversion and values.dtype is not dtype:
         raise ValueError(f"{name} must use the computation dtype when computation_dtype is omitted")
     result = values.to(dtype=dtype)
-    if not bool(torch.isfinite(result).all()):
+    if not _all_finite(result):
         raise ValueError(f"{name} must contain only finite values")
     return result
 
@@ -247,7 +290,7 @@ def _staged_categorical_centroids(
         if bool((distributions < 0).any()):
             raise ValueError(f"{name} must be non-negative")
         row_sums = distributions.sum(dim=1)
-        if not bool(torch.isfinite(row_sums).all()) or bool((row_sums <= 0).any()):
+        if not _all_finite(row_sums) or bool((row_sums <= 0).any()):
             raise ValueError(f"{name} rows must have finite positive mass")
         if not torch.allclose(row_sums, torch.ones_like(row_sums)):
             _warn(f"{name} rows do not sum to one; normalising each row", UserWarning)

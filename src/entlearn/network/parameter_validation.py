@@ -2,7 +2,11 @@
 
 import torch
 
-from entlearn.network.validation import _validate_distribution_rows, _validate_storage
+from entlearn.network.validation import (
+    _all_finite,
+    _validate_distribution_rows,
+    _validate_storage,
+)
 
 
 def validate_tensor(
@@ -26,7 +30,7 @@ def validate_tensor(
         raise ValueError(f"{name} must use the computation dtype")
     if device is not None and value.device != device:
         raise ValueError(f"{name} must use the computation device")
-    if finite and not bool(torch.isfinite(value).all()):
+    if finite and not _all_finite(value):
         raise ValueError(f"{name} must be finite")
     return value
 

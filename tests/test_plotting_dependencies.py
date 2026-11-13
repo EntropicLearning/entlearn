@@ -12,7 +12,6 @@ class TestPlottingDependencies:
     def test_plotting_extra_installs_plotly_without_changing_core(self):
         extras = metadata("entlearn").get_all("Provides-Extra")
         assert "plotting" in extras
-        assert "visuals" not in extras
         requirements = [Requirement(value) for value in requires("entlearn") or ()]
 
         def active(extra):

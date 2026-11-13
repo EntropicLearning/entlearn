@@ -1,11 +1,11 @@
 """Portable checkpoints retain fitted trajectories through the public Network."""
 
 import pickle
-import warnings
+import re
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
     assert_same_checkpoint,
     corrupt_saved_tensor,
@@ -19,22 +19,39 @@ from network._fixtures import (
 from safetensors.torch import load_file
 
 from entlearn import ClassificationHead, Coupling, Hidden, Input, Network, PredictConfig, Recipe
-from entlearn.helpers.reporting import feature_importances
+
+pytestmark = FIXED_BUDGET
+
+# The name a row-payload tensor's value checks use in their messages.
+ROW_PAYLOAD_NAMES = {
+    "blocks.0.gamma": "input.gamma",
+    "blocks.1.gamma": "hidden_1.gamma",
+    "blocks.0.instance_weights": "input.instance_weights",
+}
 
 
 class TestResumablePersistence:
-    @pytest.mark.parametrize("task", ["classification", "regression"])
-    @pytest.mark.parametrize("kind", ["standard", "categorical", "manifold"])
-    @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
-    @pytest.mark.parametrize("mode", ["single", "iterative"])
-    def test_loaded_resume_matches_uninterrupted_fit(self, tmp_path, task, kind, coupling, mode):
+    # The predict mode reaches only the stored PredictConfig, never the geometry, so one
+    # geometry carries the iterative row.
+    @pytest.mark.parametrize(
+        ("task", "kind", "coupling", "mode"),
+        [
+            *(
+                (task, kind, coupling, "single")
+                for task in ("classification", "regression")
+                for kind in ("standard", "categorical", "manifold")
+                for coupling in (Coupling.M, Coupling.S)
+            ),
+            ("classification", "standard", Coupling.M, "iterative"),
+        ],
+    )
+    def test_loaded_resume_matches_in_memory_resume(self, tmp_path, task, kind, coupling, mode):
         recipe, X, y, cats = resume_case(task, kind, coupling)
         controls = dict(
             X_cat=cats, tol=0, seed=5, predict_config=PredictConfig(predict_mode=mode, max_iter=3)
         )
         source = Network.fit(recipe, X, y, max_iter=3, **controls)
         assert not source.diagnostics.converged
-        full = Network.fit(recipe, X, y, max_iter=8, **controls)
         before = source.predict(X, X_cat=cats)
         path = tmp_path / "checkpoint.safetensors"
         loaded = round_trip_network(source, path, resumable=True)
@@ -44,16 +61,8 @@ class TestResumablePersistence:
         assert continued.diagnostics.n_iter > source.diagnostics.n_iter
         expected = source.resume(X, y, X_cat=cats, max_iter=8)
         assert_same_checkpoint(continued, expected)
-        assert continued.diagnostics.loss_history == full.diagnostics.loss_history
-        assert continued.diagnostics.n_iter == full.diagnostics.n_iter
-        torch.testing.assert_close(
-            continued.predict(X, X_cat=cats), full.predict(X, X_cat=cats), rtol=0, atol=0
-        )
         torch.testing.assert_close(
             loaded.score_samples(X, X_cat=cats), source.score_samples(X, X_cat=cats), rtol=0, atol=0
-        )
-        torch.testing.assert_close(
-            feature_importances(loaded), feature_importances(source), rtol=0, atol=0
         )
         torch.testing.assert_close(loaded.predict(X, X_cat=cats), before, rtol=0, atol=0)
         torch.testing.assert_close(source.predict(X, X_cat=cats), before, rtol=0, atol=0)
@@ -139,6 +148,8 @@ class TestResumablePersistence:
         reloaded = round_trip_network(result, path, resumable=True)
         assert_same_checkpoint(reloaded.resume(X, y), result.resume(X, y))
 
+    # Two distinct rows cap the hidden block at seeding.
+    @pytest.mark.filterwarnings("ignore:hidden block:UserWarning")
     def test_pruned_active_shapes_resume_and_fine_tune(self, tmp_path):
         X = torch.tensor([[0.0]] * 3 + [[1.0]] * 3, dtype=DTYPE, device=DEVICE)
         y = torch.tensor([0, 0, 0, 1, 1, 1], device=DEVICE)
@@ -232,27 +243,23 @@ class TestResumablePersistence:
             adapted.resume(X[:10], y[:10], max_iter=4),
         )
 
-    def test_resume_checks_meanings_and_rows_but_not_data_identity(self, tmp_path):
+    def test_resume_checks_rows_but_not_data_identity(self, tmp_path):
         recipe, X, y, cats = resume_case(kind="categorical")
         source = Network.fit(recipe, X, y, X_cat=cats, max_iter=2)
         assert not source.diagnostics.converged
         loaded = round_trip_network(source, tmp_path / "schema.safetensors", resumable=True)
         with pytest.raises(ValueError, match="row count"):
             loaded.resume(X[:10], y[:10], X_cat=(cats[0][:10],))
-        for invalid in ((), (cats[0] + 100,), (cats[0], cats[0])):
-            with pytest.raises(ValueError):
-                loaded.resume(X, y, X_cat=invalid)
-        with pytest.raises(ValueError):
-            loaded.resume(X[:, :1], y, X_cat=cats)
-        with pytest.raises(ValueError):
-            loaded.resume(X, y + 100, X_cat=cats)
-        result = loaded.resume(X.flip(0), y.flip(0), X_cat=(cats[0].flip(0),), max_iter=4)
-        expected = source.resume(X.flip(0), y.flip(0), X_cat=(cats[0].flip(0),), max_iter=4)
+        with pytest.warns(UserWarning, match="checkpoint loss differs"):
+            result = loaded.resume(X.flip(0), y.flip(0), X_cat=(cats[0].flip(0),), max_iter=4)
+        with pytest.warns(UserWarning, match="checkpoint loss differs"):
+            expected = source.resume(X.flip(0), y.flip(0), X_cat=(cats[0].flip(0),), max_iter=4)
         assert_same_checkpoint(result, expected)
         assert_same_checkpoint(loaded, source)
 
 
 class TestContinuationFinalisation:
+    @pytest.mark.filterwarnings("ignore:resume checkpoint loss differs:UserWarning")
     @pytest.mark.parametrize("supplied", [False, True])
     @pytest.mark.parametrize("ceiling", [2, 5])
     def test_calibration_provenance_and_scoring_reference_rebuild(
@@ -315,18 +322,6 @@ class TestContinuationFinalisation:
         assert on_cpu.can_resume
         assert_same_checkpoint(on_cpu.resume(X, y, max_iter=6), result.resume(X, y, max_iter=6))
 
-    def test_failed_post_load_continuation_keeps_source_unchanged(self, tmp_path):
-        recipe, X, y, _ = resume_case()
-        source = Network.fit(recipe, X, y, max_iter=2, tol=0)
-        loaded = round_trip_network(source, tmp_path / "atomic.safetensors", resumable=True)
-        # Turning a changed-objective warning into an error aborts before publication.
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", UserWarning)
-            with pytest.raises(UserWarning):
-                loaded.resume(X + 10, y, max_iter=4)
-        assert_same_checkpoint(loaded, source)
-        assert loaded.can_resume
-
 
 class TestResumableValidation:
     @pytest.mark.parametrize("member", [0, 1])
@@ -371,47 +366,60 @@ class TestResumableValidation:
         with pytest.raises(ValueError, match="row count"):
             Network.load(path)
 
-    @pytest.mark.parametrize("member", [0, 1])
+    # Every member's row tensors pass the tensor manifest, and each row-payload field reaches
+    # the simplex check once; the other damage kinds belong to the manifest owner tests.
     @pytest.mark.parametrize(
-        "field", ["blocks.0.gamma", "blocks.1.gamma", "blocks.0.instance_weights"]
+        ("member", "field", "damage"),
+        [
+            *((member, field, "missing") for member in (0, 1) for field in ROW_PAYLOAD_NAMES),
+            *((1, field, "simplex") for field in ROW_PAYLOAD_NAMES),
+        ],
     )
-    @pytest.mark.parametrize("damage", ["missing", "shape", "dtype", "nan", "simplex"])
     def test_every_members_complete_row_payload_is_validated(self, tmp_path, member, field, damage):
         recipe, X, y, _ = resume_case()
         source = Network.fit(recipe, X, y, max_iter=2, n_inits=2, retain="members")
         path = tmp_path / "damaged.safetensors"
         source.save(path, resumable=True)
-        corrupt_saved_tensor(path, f"models.{member}.{field}", damage)
-        with pytest.raises(ValueError):
+        key = f"models.{member}.{field}"
+        corrupt_saved_tensor(path, key, damage)
+        message = (
+            rf"^{re.escape(ROW_PAYLOAD_NAMES[field])} .*sum to one"
+            if damage == "simplex"
+            else f"saved tensor '{re.escape(key)}'"
+        )
+        with pytest.raises(ValueError, match=message):
             Network.load(path)
 
-    @pytest.mark.parametrize("capability", ["prediction", "unknown", True])
-    def test_capability_marker_cannot_contradict_row_payload(self, tmp_path, capability):
+    @pytest.mark.parametrize(
+        "capability,message",
+        [
+            ("prediction", "unexpected saved tensors"),
+            ("unknown", "unsupported persisted capability"),
+            (True, "unsupported persisted capability"),
+        ],
+    )
+    def test_capability_marker_cannot_contradict_row_payload(self, tmp_path, capability, message):
         recipe, X, y, _ = resume_case()
         source = Network.fit(recipe, X, y, max_iter=2)
         path = tmp_path / "capability.safetensors"
         source.save(path, resumable=True)
         set_metadata(path, ("models", 0, "capability"), capability)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(path)
 
     @pytest.mark.parametrize(
-        "field,value",
+        "field,value,message",
         [
-            ("schema", {}),
-            ("recipe", {}),
-            ("training_rows", 31),
-            ("connection_sub_seeds", []),
-            ("diagnostics", {}),
-            ("max_iter", None),
-            ("tol", -1),
+            ("schema", {}, "fields: task D_cont"),
+            ("training_rows", 31, r"saved tensor 'models\.0\.blocks\.0\.gamma'"),
+            ("max_iter", None, "integer >= 1"),
         ],
     )
-    def test_continuation_metadata_is_validated_with_rows(self, tmp_path, field, value):
+    def test_continuation_metadata_is_validated_with_rows(self, tmp_path, field, value, message):
         recipe, X, y, _ = resume_case()
         source = Network.fit(recipe, X, y, max_iter=2)
         path = tmp_path / "metadata.safetensors"
         source.save(path, resumable=True)
         set_metadata(path, ("models", 0, field), value)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(path)

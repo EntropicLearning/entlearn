@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
     blobs,
     regression_blobs,
@@ -104,12 +104,7 @@ class TestValidationContract:
                 predict_config=member.predict_config,
                 max_iter=5,
             )
-            torch.testing.assert_close(member.predict(X), replay.predict(X))
-            details = member.predict_with_details(X, details=("diagnostics",))
-            assert details.n_iter > 0
-            assert details.n_iter == len(details.loss_history)
-            assert isinstance(details.converged, bool)
-            torch.testing.assert_close(details.prediction, member.predict(X))
+            torch.testing.assert_close(member.predict(X), replay.predict(X), rtol=0, atol=0)
 
     def test_positive_class_support_survives_weight_product_underflow(self):
         X, _, _ = regression_blobs(2)
@@ -157,12 +152,9 @@ class TestValidationContract:
         )
         torch.testing.assert_close(fitted.predict(X), expected)
 
-    @pytest.mark.parametrize("with_folds", [False, True])
     @pytest.mark.parametrize("override", [False, True])
     @pytest.mark.parametrize("field", ["continuous_centroids", "feature_weights"])
-    def test_supplied_state_is_validated_before_any_dtype_conversion(
-        self, with_folds, override, field
-    ):
+    def test_supplied_state_is_validated_before_any_dtype_conversion(self, override, field):
         X, y, _ = regression_blobs(2)
         X = X.to(torch.float64)
         recipe = regression_recipe()
@@ -177,8 +169,6 @@ class TestValidationContract:
         options = dict(
             initial_state=state,
             computation_dtype=torch.float64 if override else None,
-            validation_pairs=validation_pairs() if with_folds else None,
-            selection_loss=squared_error,
             max_iter=3,
         )
         if override:
@@ -186,7 +176,7 @@ class TestValidationContract:
             assert getattr(fitted.initial_state.input_geometry, field).dtype == torch.float64
             assert getattr(state.input_geometry, field).dtype == torch.float32
         else:
-            with pytest.raises(ValueError, match="InitialState"):
+            with pytest.raises(ValueError, match=r"InitialState .*computation dtype"):
                 Network.fit(recipe, X, y, **options)
 
     @pytest.mark.parametrize("backend", ["threads", "processes"])
@@ -202,7 +192,7 @@ class TestValidationContract:
         )
         serial = Network.fit(recipe, X, codes, **options)
         parallel = Network.fit(recipe, X, codes, n_jobs=2, parallel_backend=backend, **options)
-        torch.testing.assert_close(serial.predict_all(X), parallel.predict_all(X))
+        torch.testing.assert_close(serial.predict_all(X), parallel.predict_all(X), rtol=0, atol=0)
         assert serial.predict_config == parallel.predict_config
         for a, b in zip(
             serial.diagnostics.initialisation_outcomes,
@@ -251,6 +241,7 @@ class TestValidationContract:
         assert len(calls) == 1
         assert torch.equal(calls[0], y[labelled])
 
+    @FIXED_BUDGET
     def test_fold_training_rows_restage_missing_targets_and_task_weights(self):
         """A fold's own staging keeps its unlabelled rows unlabelled and its row weights."""
         X = torch.linspace(0, 1, 8, dtype=DTYPE, device=DEVICE)[:, None]
@@ -287,12 +278,10 @@ class TestValidationContract:
         )
         assert widths == [5, 4]
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("kind", ["continuous", "categorical", "distribution", "manifold"])
-    @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
-    def test_supported_modalities_preserve_schema_weights_and_original_state(
-        self, task, kind, coupling
-    ):
+    def test_supported_modalities_preserve_schema_weights_and_original_state(self, task, kind):
         X, codes = blobs(2, 0.2, rows_per_blob=4)
         categorical = None
         if kind == "categorical":
@@ -308,9 +297,11 @@ class TestValidationContract:
             else Input(K=2, epsilon=0.2)
         )
         head = (
-            ClassificationHead(coupling=coupling) if task == "classification" else RegressionHead()
+            ClassificationHead(coupling=Coupling.M)
+            if task == "classification"
+            else RegressionHead()
         )
-        recipe = Recipe.chain(input_block, Hidden(K=2, epsilon=0.2), head, coupling=coupling)
+        recipe = Recipe.chain(input_block, Hidden(K=2, epsilon=0.2), head, coupling=Coupling.M)
         y = codes.clone() if task == "classification" else codes.to(DTYPE)[:, None]
         y[1] = -1 if task == "classification" else torch.nan
         labelled = codes >= 0
@@ -369,7 +360,10 @@ class TestValidationContract:
                 max_iter=3,
             )
             torch.testing.assert_close(
-                member.predict(X, X_cat=categorical), replay.predict(X, X_cat=categorical)
+                member.predict(X, X_cat=categorical),
+                replay.predict(X, X_cat=categorical),
+                rtol=0,
+                atol=0,
             )
 
     @pytest.mark.parametrize(
@@ -430,15 +424,14 @@ class TestValidationContract:
             sample_weights=sample_weights,
             max_iter=3,
         )
-        torch.testing.assert_close(selected.predict(X), replay.predict(X))
+        torch.testing.assert_close(selected.predict(X), replay.predict(X), rtol=0, atol=0)
 
-    @pytest.mark.parametrize("partition", ["training", "validation"])
-    @pytest.mark.parametrize("value", [float("nan"), float("inf"), True, torch.tensor([1.0])])
-    def test_invalid_callback_result_aborts_selection(self, partition, value):
+    # One routing row: test_multi_init.py owns the result check's value cases.
+    def test_invalid_callback_result_aborts_selection(self):
         X, y, _ = regression_blobs(2)
 
         def loss(*args, **context):
-            return value if context["partition"] == partition else 0.0
+            return float("nan") if context["partition"] == "training" else 0.0
 
         with pytest.raises(ValueError, match="finite real scalar"):
             Network.fit(
@@ -512,10 +505,18 @@ class TestValidationContract:
                     tol=0.0,
                 )
 
-    @pytest.mark.parametrize("rows", [[], [-1, 4], [0, 8], [0, 0]])
-    def test_invalid_initialisation_rows_raise(self, rows):
+    @pytest.mark.parametrize(
+        "rows,message",
+        [
+            ([], r"indices in \[0, 8\)"),
+            ([-1, 4], r"indices in \[0, 8\)"),
+            ([0, 8], r"indices in \[0, 8\)"),
+            ([0, 0], "duplicate indices"),
+        ],
+    )
+    def test_invalid_initialisation_rows_raise(self, rows, message):
         X, y, _ = regression_blobs(2)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.fit(
                 regression_recipe(),
                 X,
@@ -533,5 +534,7 @@ class TestValidationContract:
                 init_rows=torch.tensor([0], dtype=torch.int64, device=DEVICE),
             )
         assert fitted.initial_state.input_geometry.K_active == 1
-        torch.testing.assert_close(fitted.initial_state.input_geometry.continuous_centroids, X[:1])
+        torch.testing.assert_close(
+            fitted.initial_state.input_geometry.continuous_centroids, X[:1], rtol=0, atol=0
+        )
         torch.testing.assert_close(fitted.predict(X), y.mean(dim=0).expand_as(y))

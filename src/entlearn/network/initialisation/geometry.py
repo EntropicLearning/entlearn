@@ -14,6 +14,7 @@ from entlearn.network.build import _build_recipe, _BuiltRecipe
 from entlearn.network.data import _stage_data, _StagedData
 from entlearn.network.initialisation.capacity import validate_profile_capacity
 from entlearn.network.initialisation.centroids import (
+    cap_input_clusters_to_eligible_rows,
     select_centroid_seeds,
     stage_supplied_centroids,
 )
@@ -104,19 +105,51 @@ def _prepare_initialisation(
     return built, data
 
 
+# Seed initialisations in fixed-size batches so changing n_inits does not change
+# tensor shapes, floating-point rounding, or a candidate's selected centroid rows.
+_SEED_BATCH_SIZE = 8
+
+
+def _select_seeds_in_fixed_batches(
+    select: Callable[[list[torch.Generator]], torch.Tensor], generators: list[torch.Generator]
+) -> torch.Tensor:
+    """Select centroid rows in batches of ``_SEED_BATCH_SIZE`` generators.
+
+    Pad an incomplete batch with copies of its first generator and discard their results.
+    This keeps the calculations the same shape, avoiding batch-size-dependent rounding
+    that could change the selected rows. Pad even a single generator so a one-start
+    fit can reproduce a candidate drawn during a multi-start fit.
+    """
+    chosen = []
+    for start in range(0, len(generators), _SEED_BATCH_SIZE):
+        chunk = generators[start : start + _SEED_BATCH_SIZE]
+        lead, width = chunk[0], len(chunk)
+        copies = [
+            torch.Generator(device=lead.device).set_state(lead.get_state())
+            for _ in range(_SEED_BATCH_SIZE - width)
+        ]
+        chosen.append(select(chunk + copies)[:width])
+    return torch.cat(chosen)
+
+
 @torch.inference_mode()
-def _seed_initial_state(
+def _seed_initial_states(
     built: _BuiltRecipe,
     data: _StagedData,
     *,
     allow_conversion: bool,
-    seed: int,
+    seeds: Sequence[int],
     feature_weights: torch.Tensor | None = None,
     continuous_centroids: torch.Tensor | None = None,
     categorical_centroids: Sequence[torch.Tensor] | None = None,
     rows: torch.Tensor | None = None,
-) -> InitialState:
-    """Generate the detached input geometry for one already-staged operation."""
+) -> list[InitialState]:
+    """Build one initial state per random seed from already-staged data.
+
+    Draw centroid rows in fixed-size batches when feature weights agree across
+    initialisations. Otherwise, draw each initialisation separately using its own
+    feature weights. Each state holds input geometry and named connection seeds.
+    """
     input_block = built.input
     X_cont, X_cat = data.X_cont, data.X_cat
     sample_weights, target, labelled = data.sample_weights, data.target, data.labelled
@@ -132,16 +165,18 @@ def _seed_initial_state(
         target, labelled = target[rows], labelled[rows]
     _, D_cont = X_cont.shape
     D_total = D_cont + len(X_cat)
-    generator = torch.Generator(device=X_cont.device).manual_seed(seed)
-    resolved_feature_weights = initialise_feature_weights(
-        D_total,
-        input_block.W_std if isinstance(input_block, Input) else 0.0,
-        feature_weights,
-        generator=generator,
-        dtype=data.X_cont.dtype,
-        device=data.X_cont.device,
-    )
-    dense_categorical = densify_categorical(list(X_cat), list(data.schema.M_cat), X_cont.dtype)
+    generators = [torch.Generator(device=X_cont.device).manual_seed(seed) for seed in seeds]
+    resolved_feature_weights = [
+        initialise_feature_weights(
+            D_total,
+            input_block.W_std if isinstance(input_block, Input) else 0.0,
+            feature_weights,
+            generator=generator,
+            dtype=data.X_cont.dtype,
+            device=data.X_cont.device,
+        )
+        for generator in generators
+    ]
     supplied_centroids = stage_supplied_centroids(
         continuous_centroids,
         categorical_centroids,
@@ -153,52 +188,69 @@ def _seed_initial_state(
         allow_conversion=allow_conversion,
     )
     if supplied_centroids is None:
-        Wd_cont, Wd_cat = split_wd(resolved_feature_weights, D_cont)
         n_candidates = (
             1 if input_block.centroid_strategy == "kmeans++" else input_block.greedy_candidates
         )
-        chosen = select_centroid_seeds(
-            X_cont,
-            dense_categorical,
-            input_block.K,
-            generator,
-            Wd_cont,
-            Wd_cat,
-            sample_weights,
-            target,
-            labelled,
-            balanced=input_block.balanced,
-            n_candidates=n_candidates,
+        K = cap_input_clusters_to_eligible_rows(
+            input_block.K, labelled, balanced=input_block.balanced
         )
-        resolved_continuous_centroids = X_cont[chosen].detach().clone()
-        resolved_categorical_centroids = tuple(
-            feature[chosen].detach().clone() for feature in dense_categorical
-        )
+
+        def select(seeded: list[torch.Generator], weights: torch.Tensor) -> torch.Tensor:
+            return select_centroid_seeds(
+                X_cont,
+                list(X_cat),
+                K,
+                seeded,
+                *split_wd(weights, D_cont),
+                sample_weights,
+                target,
+                labelled,
+                balanced=input_block.balanced,
+                n_candidates=n_candidates,
+            )
+
+        first = resolved_feature_weights[0]
+        if all(torch.equal(weights, first) for weights in resolved_feature_weights):
+            chosen = _select_seeds_in_fixed_batches(lambda chunk: select(chunk, first), generators)
+        else:  # Each initialisation uses its own feature weights to compute dissimilarities.
+            chosen = torch.cat(
+                [select([g], w) for g, w in zip(generators, resolved_feature_weights, strict=True)]
+            )
+        centroids = [
+            (
+                X_cont[selected],
+                tuple(
+                    densify_categorical(
+                        [feature[selected] for feature in X_cat],
+                        list(data.schema.M_cat),
+                        X_cont.dtype,
+                    )
+                ),
+            )
+            for selected in chosen
+        ]
     else:
-        resolved_continuous_centroids, resolved_categorical_centroids = supplied_centroids
-    projectors = (
-        seed_projectors(
-            X_cont,
-            resolved_continuous_centroids,
-            input_block.subspace_dimension,
+        centroids = [supplied_centroids] * len(seeds)
+    return [
+        InitialState(
+            input_geometry=InputGeometry(
+                input=input_block,
+                continuous_centroids=continuous,
+                categorical_centroids=categorical,
+                feature_weights=weights if isinstance(input_block, Input) else None,
+                manifold_projectors=(
+                    seed_projectors(X_cont, continuous, input_block.subspace_dimension)
+                    if isinstance(input_block, ManifoldInput)
+                    else None
+                ),
+                captured=False,
+            ),
+            connection_sub_seeds=tuple(
+                (connection.name, _connection_sub_seed(seed, connection.name))
+                for connection in built.connections
+            ),
         )
-        if isinstance(input_block, ManifoldInput)
-        else None
-    )
-    geometry = InputGeometry(
-        input=input_block,
-        continuous_centroids=resolved_continuous_centroids,
-        categorical_centroids=resolved_categorical_centroids,
-        feature_weights=(
-            resolved_feature_weights.detach().clone() if isinstance(input_block, Input) else None
-        ),
-        manifold_projectors=projectors,
-        captured=False,
-    )
-    return InitialState(
-        input_geometry=geometry,
-        connection_sub_seeds=tuple(
-            (connection.name, _connection_sub_seed(seed, connection.name))
-            for connection in built.connections
-        ),
-    )
+        for seed, weights, (continuous, categorical) in zip(
+            seeds, resolved_feature_weights, centroids, strict=True
+        )
+    ]

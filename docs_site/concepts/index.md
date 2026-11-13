@@ -48,7 +48,7 @@ Feature weights $W_D$ and instance weights $W_T$ act on the input term.
 Output weights $W_M$ act on the regression term.
 Supplied sample weights, when given, weight the coupling and output terms and the affiliation entropy, and contribute to the output weighting together with any class or task weights. Instance weights start at the normalised sample weights and are fixed there if not learned.
 
-Affiliations and learned weight vectors receive entropy rewards, scaled by their temperatures. The temperatures control the balance between minimising the costs and spreading weight across entries.
+Affiliations and learned weight vectors receive entropy penalties, scaled by their temperatures. The temperatures control the balance between minimising the costs and spreading weight across entries.
 
 ## One iteration
 
@@ -70,7 +70,7 @@ The input block computes its affiliations from the fitted geometry, and each hid
 
 The head then forms the prediction:
 
-- Classification uses a geometric read-out with a calibrated output temperature. M heads also support an arithmetic read-out.
+- Classification uses a geometric read-out with a calibrated output temperature. `Coupling.M` heads also support an arithmetic read-out.
 - Regression returns the affiliation-weighted average of the output centroids.
 
 [Iterative prediction](../guide/networks.md#predict-new-observations) repeatedly updates the new observations' affiliations and prediction coordinates while keeping learned parameters fixed. 

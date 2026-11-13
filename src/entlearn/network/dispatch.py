@@ -5,7 +5,7 @@ from __future__ import annotations
 import multiprocessing
 import threading
 import warnings
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import partial
@@ -39,7 +39,7 @@ def _hold(
 
 
 @contextmanager
-def _holding_warnings(fallback: _HeldWarnings) -> Iterator[None]:
+def _holding_warnings(fallback: _HeldWarnings) -> Generator[None]:
     """Hold back every warning in this process, from any thread, until the outermost block exits."""
     catcher = warnings.catch_warnings()
     with _window_lock:

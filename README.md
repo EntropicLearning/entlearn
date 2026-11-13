@@ -1,10 +1,5 @@
 # Entlearn
 
-> [!NOTE]
-> This is a pre-release. `entlearn` is not on PyPI yet, so until it is, install it from
-> GitHub with `pip install git+https://github.com/EntropicLearning/entlearn` (or
-> `uv add git+https://github.com/EntropicLearning/entlearn`).
-
 [![PyPI version](https://img.shields.io/pypi/v/entlearn.svg)](https://pypi.org/project/entlearn/) [![Python versions](https://img.shields.io/pypi/pyversions/entlearn.svg)](https://pypi.org/project/entlearn/) [![CI](https://github.com/EntropicLearning/entlearn/actions/workflows/ci.yml/badge.svg)](https://github.com/EntropicLearning/entlearn/actions/workflows/ci.yml) [![Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://entropiclearning.github.io/entlearn/) [![Licence](https://img.shields.io/github/license/EntropicLearning/entlearn.svg)](https://github.com/EntropicLearning/entlearn/blob/main/LICENSE)
 
 `entlearn` is a pure-tensor PyTorch implementation of Entropy-Optimal Networks (EON):

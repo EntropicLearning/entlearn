@@ -5,7 +5,8 @@ from dataclasses import replace
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, RANK_DEFICIENT
+from network._fixtures import squared_error
 
 from entlearn import (
     ClassificationHead,
@@ -32,7 +33,6 @@ class TestInputCapacity:
             state = Network.initialise(recipe, X, y, seed=3)
         assert state.input_geometry.K_active == 4
         assert state.input_geometry.input == recipe.blocks[0]
-        assert recipe.blocks[0].K == 7
         torch.testing.assert_close(state.input_geometry.continuous_centroids.sort(dim=0).values, X)
         with pytest.warns(UserWarning, match=r"K=7.*4.*reducing"):
             fitted = Network.fit(recipe, X, y, seed=3)
@@ -50,6 +50,7 @@ class TestInputCapacity:
             state = Network.initialise(recipe, X, X[:, 0], seed=3)
         assert state.input_geometry.K_active == 4
 
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("kind", ["continuous", "mixed", "categorical", "manifold"])
     @pytest.mark.parametrize(
         "strategy,candidates",
@@ -132,9 +133,6 @@ class TestInputCapacity:
         pairs = [(torch.tensor([0, 2, 4], device=DEVICE), torch.tensor([1, 3, 5], device=DEVICE))]
         common_rows = torch.tensor([0, 2], device=DEVICE)
 
-        def loss(prediction, target, **kwargs):
-            return (prediction - target).square().mean()
-
         with warnings.catch_warnings(record=True) as observed:
             warnings.simplefilter("always")
             fitted = Network.fit(
@@ -143,7 +141,7 @@ class TestInputCapacity:
                 y,
                 init_rows=common_rows,
                 validation_pairs=pairs,
-                selection_loss=loss,
+                selection_loss=squared_error,
                 n_inits=2,
                 n_jobs=2,
                 parallel_backend=backend,
@@ -156,11 +154,16 @@ class TestInputCapacity:
                     "reducing the initial input cluster count" in str(item.message)
                     for item in observed
                 )
-                == 2
+                == 1  # the candidates are seeded together, before dispatch
             )
         assert len(fitted.members) == 2
         for state, member in zip(fitted.initial_states, fitted.members, strict=True):
-            assert state is member.initial_state
+            torch.testing.assert_close(
+                member.initial_state.input_geometry.continuous_centroids,
+                state.input_geometry.continuous_centroids,
+                rtol=0,
+                atol=0,
+            )
             assert state.input_geometry.K_active == 2
             assert state.input_geometry.input.K == 8
             torch.testing.assert_close(
@@ -181,11 +184,10 @@ class TestInputCapacity:
         assert state.input_geometry.K_active == 4
         torch.testing.assert_close(state.input_geometry.continuous_centroids, centroids)
 
-    @pytest.mark.parametrize("input_type", [Input, ManifoldInput])
     @pytest.mark.parametrize("width", [0, 4])
-    def test_invalid_state_width_still_raises(self, input_type, width):
+    def test_invalid_state_width_still_raises(self, width):
         X = torch.tensor([[0.0], [1.0]], dtype=DTYPE, device=DEVICE)
-        recipe = Recipe.chain(input_type(K=2), RegressionHead())
+        recipe = Recipe.chain(Input(K=2), RegressionHead())
         state = Network.initialise(recipe, X, X[:, 0])
         invalid = replace(
             state,

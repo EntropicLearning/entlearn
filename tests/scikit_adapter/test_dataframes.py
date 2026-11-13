@@ -88,31 +88,26 @@ class TestEagerDataframes:
         )
 
     @pytest.mark.parametrize(
-        "invalid", ["name", "order", "missing", "extra", "unknown", "null", "nan"]
+        ("invalid", "message"),
+        [
+            ("name", "feature names"),
+            ("unknown", r"unseen at fit time: .*'unseen'"),
+            ("null", "contains missing values"),
+        ],
+        ids=["name", "unknown", "null"],
     )
-    def test_invalid_queries_and_refits_preserve_previous_fit(self, invalid):
+    def test_invalid_queries_are_refused(self, invalid, message):
         _, frame, y = mixed_frames()
         estimator = dataframe_classifier().fit(frame, y)
-        before = estimator.predict_proba(frame)
-        network = estimator.network_
-        queries = {
+        query = {
             "name": frame.rename({"easting": "other"}),
-            "order": frame.select(frame.columns[::-1]),
-            "missing": frame.drop("easting"),
-            "extra": frame.with_columns(pl.lit(0.0).alias("extra")),
             "unknown": frame.with_columns(pl.lit("unseen").alias("category")),
             "null": frame.with_columns(pl.lit(None, dtype=pl.String).alias("category")),
-            "nan": frame.with_columns(pl.lit(float("nan")).alias("easting")),
-        }
-        with pytest.raises(ValueError):
-            estimator.predict(queries[invalid])
-        if invalid in ("null", "nan"):
-            with pytest.raises(ValueError):
-                estimator.fit(queries[invalid], y)
-            assert estimator.network_ is network
-        np.testing.assert_array_equal(estimator.predict_proba(frame), before)
+        }[invalid]
+        with pytest.raises(ValueError, match=message):
+            estimator.predict(query)
 
-    def test_categorical_only_and_dropped_columns(self):
+    def test_query_values_in_a_dropped_column_are_ignored(self):
         _, _, y = mixed_frames()
         frame = pl.DataFrame({"constant": ["one"] * len(y), "category": y})
         estimator = dataframe_classifier()

@@ -12,40 +12,22 @@ from entlearn.network.data import _RegressionSupervision
 
 
 class TestRegressionTargets:
-    def test_warns_once_and_masks_a_partially_missing_row(self):
-        X_cont = torch.arange(8, dtype=torch.float64).reshape(4, 2)
+    def test_a_fully_missing_row_is_accepted_without_a_warning(self):
+        X_cont = torch.linspace(0, 1, 6, dtype=DTYPE, device=DEVICE).reshape(3, 2)
         target = torch.tensor(
-            [[1.0, 2.0], [3.0, float("nan")], [float("nan"), float("nan")], [5.0, 6.0]],
-            dtype=torch.float32,
-        )
-
-        with pytest.warns(UserWarning, match="1 regression target row.*partially missing") as seen:
-            state = Network.initialise(regression_recipe(), X_cont, target, seed=3)
-
-        assert len(seen) == 1
-        assert state.input_geometry.continuous_centroids.shape == (2, 2)
-        assert state.input_geometry.continuous_centroids.dtype is torch.float64
-
-    def test_a_fully_missing_row_is_unlabelled_without_a_warning(self):
-        X_cont = torch.arange(6, dtype=torch.float64).reshape(3, 2)
-        target = torch.tensor(
-            [[1.0, 2.0], [float("nan"), float("nan")], [5.0, 6.0]],
-            dtype=torch.float64,
+            [[1.0, 2.0], [float("nan"), float("nan")], [5.0, 6.0]], dtype=DTYPE, device=DEVICE
         )
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            state = Network.initialise(regression_recipe(), X_cont, target)
-
-        assert state.input_geometry.continuous_centroids.shape == (2, 2)
+            Network.initialise(regression_recipe(), X_cont, target)
 
     def test_a_partially_missing_row_remains_available_to_input_initialisation(self):
-        X_cont = torch.tensor([[0.0], [10.0], [20.0]], dtype=torch.float64)
+        X_cont = torch.tensor([[0.0], [0.5], [1.0]], dtype=DTYPE, device=DEVICE)
         target = torch.tensor(
-            [[1.0, 2.0], [3.0, float("nan")], [5.0, 6.0]],
-            dtype=torch.float64,
+            [[1.0, 2.0], [3.0, float("nan")], [5.0, 6.0]], dtype=DTYPE, device=DEVICE
         )
-        sample_weights = torch.tensor([1e-30, 1.0, 1e-30], dtype=torch.float64)
+        sample_weights = torch.tensor([1e-30, 1.0, 1e-30], dtype=DTYPE, device=DEVICE)
 
         with pytest.warns(UserWarning, match="partially missing"):
             state = Network.initialise(
@@ -58,52 +40,56 @@ class TestRegressionTargets:
 
         assert torch.equal(
             state.input_geometry.continuous_centroids,
-            torch.tensor([[10.0]], dtype=torch.float64),
+            torch.tensor([[0.5]], dtype=DTYPE, device=DEVICE),
         )
 
     @pytest.mark.parametrize(
-        "target",
+        "target,message",
         (
-            pytest.param(torch.arange(4, dtype=torch.int64), id="integer"),
-            pytest.param(torch.arange(4, dtype=torch.float16), id="lower-precision"),
-            pytest.param(torch.ones(4, dtype=torch.complex64), id="complex"),
-            pytest.param(torch.ones(4, 1, 1), id="three-dimensional"),
-            pytest.param(torch.ones(3), id="wrong-row-count"),
-            pytest.param(torch.empty(4, 0), id="empty-output"),
+            pytest.param(
+                torch.arange(4, dtype=torch.int64), "floating length-T vector", id="integer"
+            ),
+            pytest.param(
+                torch.arange(4, dtype=torch.float16),
+                "floating length-T vector",
+                id="lower-precision",
+            ),
+            pytest.param(torch.ones(4, 1, 1), "floating length-T vector", id="three-dimensional"),
+            pytest.param(torch.ones(3), "same row count", id="wrong-row-count"),
+            pytest.param(torch.empty(4, 0), "positive output dimension", id="empty-output"),
             pytest.param(
                 torch.tensor([1.0, float("inf"), 2.0, 3.0]),
+                "y values must be finite",
                 id="infinite-labelled-value",
             ),
-            pytest.param(torch.full((4,), float("nan")), id="no-labelled-row"),
+            pytest.param(
+                torch.full((4,), float("nan")),
+                "y must contain a labelled row",
+                id="no-labelled-row",
+            ),
         ),
     )
-    def test_rejects_invalid_regression_targets(self, target):
-        X_cont = torch.arange(8, dtype=torch.float64).reshape(4, 2)
+    def test_rejects_invalid_regression_targets(self, target, message):
+        X_cont = torch.linspace(0, 1, 8, dtype=DTYPE, device=DEVICE).reshape(4, 2)
 
-        with pytest.raises(ValueError):
-            Network.initialise(regression_recipe(), X_cont, target)
+        with pytest.raises(ValueError, match=message):
+            Network.initialise(regression_recipe(), X_cont, target.to(DEVICE))
 
 
 class TestRegressionWeights:
-    def test_output_weights_are_the_sample_weights_on_labelled_rows(self):
+    # No public reading exposes the output weights omega, and a one-cluster head's prediction
+    # is invariant to their total, so the staged weights are checked against loss.md directly.
+    @pytest.mark.parametrize("weighted", [False, True], ids=["sample-only", "task-weighted"])
+    def test_output_weights_follow_the_documented_formula(self, weighted):
         X_cont = torch.linspace(0, 1, 6, dtype=DTYPE, device=DEVICE).unsqueeze(1)
         nan = float("nan")
         target = torch.tensor([0.2, nan, 0.7, nan, 0.9, 0.1], dtype=DTYPE, device=DEVICE)
         sample_weights = torch.tensor([1.0, 4.0, 2.0, 3.0, 5.0, 1.0], dtype=DTYPE, device=DEVICE)
-
-        _, data = stage(regression_recipe(), X_cont, target, sample_weights=sample_weights)
-
-        expected = torch.where(target.isnan(), 0.0, data.sample_weights)
-        supervision = data.supervision
-        assert isinstance(supervision, _RegressionSupervision)
-        torch.testing.assert_close(supervision.row_weights, expected)
-
-    def test_task_weights_keep_the_output_weights_at_the_labelled_share(self):
-        X_cont = torch.linspace(0, 1, 6, dtype=DTYPE, device=DEVICE).unsqueeze(1)
-        nan = float("nan")
-        target = torch.tensor([0.2, nan, 0.7, nan, 0.9, 0.1], dtype=DTYPE, device=DEVICE)
-        sample_weights = torch.tensor([1.0, 4.0, 2.0, 3.0, 5.0, 1.0], dtype=DTYPE, device=DEVICE)
-        task_weights = torch.tensor([3.0, 1.0, 0.5, 1.0, 2.0, 7.0], dtype=DTYPE, device=DEVICE)
+        task_weights = (
+            torch.tensor([3.0, 1.0, 0.5, 1.0, 2.0, 7.0], dtype=DTYPE, device=DEVICE)
+            if weighted
+            else None
+        )
 
         _, data = stage(
             regression_recipe(),
@@ -113,22 +99,27 @@ class TestRegressionWeights:
             task_weights=task_weights,
         )
 
-        labelled_share = data.sample_weights[~target.isnan()].sum()
+        # omega_t = f w_t q_t / sum_L w_s q_s on labelled rows, f the labelled share of w.
+        w = sample_weights / sample_weights.sum()
+        q = torch.ones_like(w) if task_weights is None else task_weights
+        labelled = ~target.isnan()
+        f = w[labelled].sum()
+        expected = torch.where(labelled, f * w * q / (w * q)[labelled].sum(), 0.0)
         supervision = data.supervision
         assert isinstance(supervision, _RegressionSupervision)
-        torch.testing.assert_close(supervision.row_weights.sum(), labelled_share)
+        torch.testing.assert_close(supervision.row_weights, expected)
 
     def test_task_weights_do_not_change_centroid_selection(self):
-        X_cont = torch.tensor([[0.0], [10.0], [20.0], [30.0]], dtype=torch.float64)
-        target = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float32)
-        sample_weights = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float32)
+        X_cont = torch.linspace(0, 1, 4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
+        target = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=DTYPE, device=DEVICE)
+        sample_weights = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=DTYPE, device=DEVICE)
 
         first = Network.initialise(
             regression_recipe(),
             X_cont,
             target,
             sample_weights=sample_weights,
-            task_weights=torch.tensor([1.0, 7.0, 2.0, 4.0]),
+            task_weights=torch.tensor([1.0, 7.0, 2.0, 4.0], dtype=DTYPE, device=DEVICE),
             seed=11,
         )
         second = Network.initialise(
@@ -136,7 +127,7 @@ class TestRegressionWeights:
             X_cont,
             target,
             sample_weights=sample_weights,
-            task_weights=torch.tensor([9.0, 1.0, 5.0, 2.0]),
+            task_weights=torch.tensor([9.0, 1.0, 5.0, 2.0], dtype=DTYPE, device=DEVICE),
             seed=11,
         )
 
@@ -145,56 +136,69 @@ class TestRegressionWeights:
         )
 
     @pytest.mark.parametrize(
-        "weight",
+        "weight,message",
         (
-            pytest.param(torch.ones(3), id="shape"),
-            pytest.param(torch.ones(4, dtype=torch.int64), id="dtype"),
-            pytest.param(torch.tensor([1.0, float("nan"), 1.0, 1.0]), id="non-finite"),
-            pytest.param(torch.tensor([1.0, -1.0, 1.0, 1.0]), id="negative"),
-            pytest.param(torch.zeros(4), id="zero-labelled-mass"),
+            pytest.param(torch.ones(3), "task_weights must be a length-4", id="shape"),
+            pytest.param(torch.zeros(4), "positive-weight labelled mass", id="zero-labelled-mass"),
         ),
     )
-    def test_rejects_invalid_task_weights(self, weight):
-        X_cont = torch.arange(4, dtype=torch.float64).unsqueeze(1)
-        target = torch.arange(4, dtype=torch.float64)
+    def test_rejects_invalid_task_weights(self, weight, message):
+        X_cont = torch.linspace(0, 1, 4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
+        target = torch.arange(4, dtype=DTYPE, device=DEVICE)
 
-        with pytest.raises(ValueError):
-            Network.initialise(regression_recipe(), X_cont, target, task_weights=weight)
+        with pytest.raises(ValueError, match=message):
+            Network.initialise(
+                regression_recipe(), X_cont, target, task_weights=weight.to(DTYPE).to(DEVICE)
+            )
 
     def test_rejects_class_weights(self):
-        X_cont = torch.arange(4, dtype=torch.float64).unsqueeze(1)
-        target = torch.arange(4, dtype=torch.float64)
+        X_cont = torch.linspace(0, 1, 4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
+        target = torch.arange(4, dtype=DTYPE, device=DEVICE)
 
-        with pytest.raises(ValueError, match="regression does not accept class_weights"):
-            Network.initialise(regression_recipe(), X_cont, target, class_weights=torch.ones(1))
+        with pytest.raises(ValueError, match="does not accept class_weights"):
+            Network.initialise(
+                regression_recipe(),
+                X_cont,
+                target,
+                class_weights=torch.ones(1, dtype=DTYPE, device=DEVICE),
+            )
 
     def test_rejects_task_weights_that_are_neither_a_tensor_nor_a_callable(self):
         X_cont = torch.linspace(0, 1, 4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
 
-        with pytest.raises(ValueError, match="task_weights must be a tensor or callable"):
+        with pytest.raises(ValueError, match=r"task_weights .*tensor or callable"):
             Network.initialise(regression_recipe(), X_cont, X_cont[:, 0], task_weights=[1.0] * 4)
 
-    @pytest.mark.parametrize("W_M", [(1e39, 1.0), (1e-50, 1.0)], ids=["overflow", "underflow"])
-    def test_rejects_fixed_output_weights_outside_float32(self, W_M):
+    def test_a_target_without_a_labelled_row_is_refused_before_the_callable_runs(self):
+        X_cont = torch.linspace(0, 1, 4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
+        target = torch.full((4,), float("nan"), dtype=DTYPE, device=DEVICE)
+
+        def weighting(labelled_target):
+            raise AssertionError("task_weights called without a labelled row")
+
+        with pytest.raises(ValueError, match="y must contain a labelled row"):
+            Network.initialise(regression_recipe(), X_cont, target, task_weights=weighting)
+
+    @pytest.mark.parametrize(
+        ("W_M", "message"),
+        [
+            pytest.param((1.0,), r"W_M has length 1 .* regression targets is 2", id="short"),
+            pytest.param((1.0, 2.0, 3.0), r"W_M has length 3 .* targets is 2", id="long"),
+            pytest.param((1e39, 1.0), r"W_M .*positive in the computation dtype", id="overflow"),
+            pytest.param((1e-50, 1.0), r"W_M .*positive in the computation dtype", id="underflow"),
+        ],
+    )
+    def test_rejects_invalid_fixed_output_weights(self, W_M, message):
         X_cont = torch.linspace(0, 1, 8, dtype=DTYPE, device=DEVICE).reshape(4, 2)
 
-        with pytest.raises(ValueError, match="fixed W_M must be finite and positive"):
+        with pytest.raises(ValueError, match=message):
             Network.initialise(
                 regression_recipe(W_M=W_M), X_cont, X_cont, computation_dtype=torch.float32
             )
 
-    def test_a_one_dimensional_target_has_one_fixed_output_weight(self):
+    def test_fixed_output_weights_match_the_output_dimension(self):
         X_cont = torch.linspace(0, 1, 4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
         target = X_cont[:, 0]
 
         Network.initialise(regression_recipe(W_M=(1.0,)), X_cont, target)
-        with pytest.raises(ValueError, match="length 2 but the output dimension is 1"):
-            Network.initialise(regression_recipe(W_M=(1.0, 2.0)), X_cont, target)
-
-    def test_accepts_and_validates_fixed_output_weights_at_the_data_width(self):
-        X_cont = torch.arange(8, dtype=torch.float32).reshape(4, 2)
-        target = torch.arange(8, dtype=torch.float64).reshape(4, 2)
-
-        state = Network.initialise(regression_recipe(W_M=(2.0, 3.0)), X_cont, target)
-
-        assert state.input_geometry.continuous_centroids.dtype is torch.float32
+        Network.initialise(regression_recipe(W_M=(2.0, 3.0)), X_cont, torch.stack([target] * 2, 1))

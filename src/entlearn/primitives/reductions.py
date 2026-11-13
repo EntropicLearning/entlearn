@@ -1,8 +1,38 @@
-"""Cost reductions over the affiliations: the instance-weight cost and the input loss term."""
+"""Reductions over the rows: the instance-weight cost, the input loss term and chunked products."""
 
 from __future__ import annotations
 
 import torch
+
+# Rows reduced by one product in a chunked product; the chunk products are then summed pairwise.
+_CHUNK_ROWS = 4096
+# cuBLAS sums one long product accurately; its batched chunks are faster only in float32.
+_CUDA_MIN_CHUNKS = 16
+
+
+def _chunked_product_(
+    out: torch.Tensor, A: torch.Tensor, B: torch.Tensor, scratch: torch.Tensor
+) -> None:
+    """Write ``out = Aᵀ B`` as products over row chunks summed pairwise.
+
+    It takes one product instead when ``A`` has fewer than two chunks of rows, when the
+    contiguous ``scratch`` cannot hold the chunk products, and on CUDA in float64 or below
+    ``_CUDA_MIN_CHUNKS`` chunks.
+    """
+    n = A.shape[0] // _CHUNK_ROWS
+    cuda_one = A.is_cuda and (A.dtype == torch.float64 or n < _CUDA_MIN_CHUNKS)
+    if n < 2 or cuda_one or n * out.numel() > scratch.numel():
+        torch.mm(A.transpose(0, 1), B, out=out)
+        return
+    rows = n * _CHUNK_ROWS
+    partial = scratch.view(-1)[: n * out.numel()].view(n, *out.shape)
+    torch.bmm(
+        A[:rows].view(n, _CHUNK_ROWS, -1).transpose(1, 2),
+        B[:rows].view(n, _CHUNK_ROWS, -1),
+        out=partial,
+    )
+    torch.sum(partial, dim=0, out=out)
+    out.addmm_(A[rows:].transpose(0, 1), B[rows:])
 
 
 def compute_wt_cost_(

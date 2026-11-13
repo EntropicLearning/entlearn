@@ -29,10 +29,10 @@ def copy_tensor(value: torch.Tensor, dtype: torch.dtype, device: torch.device) -
 def copy_log(log_value: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
     """Copy a cached log beside its already copied ``value``.
 
-    A changed dtype recomputes the log from ``value`` rather than rounding the old one.
+    A changed dtype or device recomputes the log from ``value``, as loading does.
     """
     result = copy_tensor(log_value, value.dtype, value.device)
-    if log_value.dtype != value.dtype:
+    if (log_value.dtype, log_value.device) != (value.dtype, value.device):
         floored_log_(result, value)
     return result
 

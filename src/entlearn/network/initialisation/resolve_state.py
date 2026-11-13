@@ -9,7 +9,7 @@ from entlearn.network.blocks.manifold import stage_projectors
 from entlearn.network.build import _BuiltRecipe
 from entlearn.network.data import _StagedData
 from entlearn.network.initialisation.capacity import validate_connection_capacity
-from entlearn.network.initialisation.geometry import _seed_initial_state, resolve_connection_seeds
+from entlearn.network.initialisation.geometry import _seed_initial_states, resolve_connection_seeds
 from entlearn.network.parameter_validation import validate_simplex_tensor, validate_tensor
 from entlearn.network.state import (
     InitialState,
@@ -22,6 +22,7 @@ from entlearn.network.state import (
     _input_width,
     _RegressionParameters,
 )
+from entlearn.network.validation import _validate_continuous
 from entlearn.recipe import (
     ClassificationHead,
     Coupling,
@@ -57,9 +58,14 @@ def validate_initial_state(
     _validate_connection_seeds(state.connection_sub_seeds)
 
 
-def _converted(value: object, name: str, computation_dtype: torch.dtype | None) -> torch.Tensor:
+def _converted(
+    value: object,
+    name: str,
+    computation_dtype: torch.dtype | None,
+    shape: tuple[int, ...] | None = None,
+) -> torch.Tensor:
     """Validate a floating tensor, then its finiteness after conversion to the fit dtype."""
-    tensor = validate_tensor(value, name, finite=False).to(dtype=computation_dtype)
+    tensor = validate_tensor(value, name, shape, finite=False).to(dtype=computation_dtype)
     return validate_tensor(tensor, name)
 
 
@@ -104,13 +110,14 @@ def _validate_input_geometry(
     if geometry.manifold_projectors is not None:
         raise ValueError("standard input cannot have manifold_projectors")
     for c in geometry.categorical_centroids:
-        c = validate_tensor(c, "categorical_centroids")
+        c = _converted(c, "categorical_centroids", computation_dtype)
         if c.ndim != 2 or c.shape[0] != K or c.shape[1] < 2:
             raise ValueError("invalid categorical centroid shape")
         _simplex(c, "categorical_centroids", computation_dtype)
-    weights = validate_tensor(
+    weights = _converted(
         geometry.feature_weights,
         "feature_weights",
+        computation_dtype,
         (D + len(geometry.categorical_centroids),),
     )
     _simplex(weights, "feature_weights", computation_dtype)
@@ -122,7 +129,7 @@ def _validate_parameter_group(
     """Validate one hidden, classification or regression starting group."""
     match group:
         case _HiddenParameters():
-            theta = validate_tensor(group.theta, "hidden transition")
+            theta = _converted(group.theta, "hidden transition", computation_dtype)
             if (
                 type(group.description) is not Hidden
                 or theta.ndim != 2
@@ -135,7 +142,7 @@ def _validate_parameter_group(
             dim = 0 if group.coupling is Coupling.M else 1
             _simplex(theta, "hidden transition", computation_dtype, dim)
         case _ClassificationParameters():
-            theta = validate_tensor(group.theta, "classification transition")
+            theta = _converted(group.theta, "classification transition", computation_dtype)
             if (
                 type(group.description) is not ClassificationHead
                 or theta.ndim != 2
@@ -150,7 +157,7 @@ def _validate_parameter_group(
             if type(group.description) is not RegressionHead or C_y.ndim != 2 or min(C_y.shape) < 1:
                 raise ValueError("invalid regression centroid shape")
             if group.W_M is not None:
-                W_M = validate_tensor(group.W_M, "W_M", (C_y.shape[0],))
+                W_M = _converted(group.W_M, "W_M", computation_dtype, (C_y.shape[0],))
                 _simplex(W_M, "W_M", computation_dtype)
         case _:
             raise ValueError("unsupported starting parameter group")
@@ -185,10 +192,7 @@ def staging_hints(
     """
     if state is None:
         return None, None
-    dtype = computation_dtype or (X.dtype if isinstance(X, torch.Tensor) else None)
-    if dtype not in (torch.float32, torch.float64):
-        raise ValueError("computation dtype must be float32 or float64")
-    validate_initial_state(state, dtype)
+    validate_initial_state(state, _validate_continuous(X, computation_dtype).dtype)
     geometry = state.input_geometry
     cards = None
     if (
@@ -272,8 +276,10 @@ def _select_geometry(
         geometry = None
     if geometry is None:
         # A geometry was not provided, rejected, or does not match
-        generated = _seed_initial_state(built, data, allow_conversion=allow_conversion, seed=seed)
-        geometry = generated.input_geometry
+        generated = _seed_initial_states(
+            built, data, allow_conversion=allow_conversion, seeds=(seed,)
+        )
+        geometry = generated[0].input_geometry
     assert geometry is not None
     return geometry
 
@@ -378,7 +384,7 @@ def _note_unused(
     retained: bool,
     width: int,
 ) -> None:
-    """Warn for each provided group or connection seed the Recipe lacks, and for a capped input.
+    """Warn for each provided group the Recipe lacks and for a capped input.
 
     A state the fit uses nothing from warns once, unless an earlier warning gives the cause.
     """
@@ -399,13 +405,6 @@ def _note_unused(
             f"InitialState block {name!r} matches no Recipe block and is ignored; "
             "initialising normally",
         )
-    connections = {connection.name for connection in built.connections}
-    for name in (name for name, _ in provided.connection_sub_seeds if name not in connections):
-        _note(
-            messages,
-            f"InitialState connection seed {name!r} matches no Recipe connection and is "
-            "ignored; initialising normally",
-        )
     K = built.input.K
     if geometry_used and width < K:
         _note(
@@ -413,6 +412,7 @@ def _note_unused(
             f"InitialState block {built.input.name!r} holds {width} centroids for the "
             f"requested K={K}; fitting {width} input clusters",
         )
+    connections = {connection.name for connection in built.connections}
     seeded = any(name in connections for name, _ in provided.connection_sub_seeds)
     if not (geometry_used or retained or seeded or messages):
         _note(

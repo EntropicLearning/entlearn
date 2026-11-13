@@ -57,6 +57,8 @@ decision = plot_decision(network, X, y)
 Each class has a colour, and the map mixes them in proportion to the predicted probabilities, so a confident region shows its class colour and an uncertain one a blend.
 For the two dimensional grid to work, the other continuous features are held at their medians.
 When the network learned instance weights, a second panel shows its [inlier percentiles](networks.md#reconstruction-and-inlier-percentiles) over the same grid.
+Both panels use equal x and y scales and keep the same feature ranges when resized,
+so the decision and confidence maps remain directly comparable in a narrow view.
 
 ## Every centroid in every feature
 

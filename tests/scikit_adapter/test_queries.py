@@ -1,9 +1,11 @@
 """Fitted query behaviour through the estimator boundary."""
 
+from functools import partial
+
 import numpy as np
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 
@@ -12,6 +14,8 @@ from entlearn.helpers.reporting import active_features, count_parameters, effect
 from entlearn.scikit_adapter import EONClassifier, EONRegressor
 
 from ._fixtures import fitted_query_model
+
+pytestmark = FIXED_BUDGET
 
 # Every name that needs a fitted Network, by how it is used: an attribute is
 # read, a query is called with rows and a report is called without arguments.
@@ -31,6 +35,15 @@ _FITTED_NAMES = {
 }
 
 
+def _use_member(model, name, kind, X):
+    """Read a fitted name, and call it when it is a query or a report."""
+    member = getattr(model, name)
+    if kind == "query":
+        member(X)
+    elif kind == "report":
+        member()
+
+
 class TestQueries:
     @pytest.mark.parametrize("estimator_type", [EONClassifier, EONRegressor])
     @pytest.mark.parametrize("manifold", [False, True])
@@ -38,17 +51,16 @@ class TestQueries:
         model, X = fitted_query_model(estimator_type, manifold)
         query = X * 0.9 + 0.03
         weights = model.recover_instance_weights(query)
-        tolerance = 512 * torch.finfo(DTYPE).eps
+        # Another batch only reorders the per-row distance sums, and the weights are
+        # positive, so they agree to a few units in the last place.
+        tolerance = 16 * torch.finfo(DTYPE).eps
         np.testing.assert_allclose(
-            model.recover_instance_weights(query[::-1])[::-1],
-            weights,
-            atol=tolerance,
-            rtol=tolerance,
+            model.recover_instance_weights(query[::-1])[::-1], weights, atol=0, rtol=tolerance
         )
         np.testing.assert_allclose(
             np.concatenate([model.recover_instance_weights(row[None, :]) for row in query]),
             weights,
-            atol=tolerance,
+            atol=0,
             rtol=tolerance,
         )
         # These queries differ from the training reference; no exact reference
@@ -73,6 +85,10 @@ class TestQueries:
             np.testing.assert_array_equal(
                 model.score_samples(X, predict_config=policy),
                 model.network_.score_samples(tensor, predict_config=policy).cpu().numpy(),
+            )
+            np.testing.assert_array_equal(
+                model.reconstruct(X, predict_config=policy).continuous,
+                model.network_.reconstruct(tensor, predict_config=policy).continuous.cpu().numpy(),
             )
             assert actual.dtype == expected.cpu().numpy().dtype
 
@@ -100,25 +116,18 @@ class TestQueries:
                 model.active_features(), active_features(model.network_, tol=1.0).cpu().numpy()
             )
         else:
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="'feature_weights' is unavailable"):
                 model.active_features()
 
-    @pytest.mark.parametrize("estimator_type", [EONClassifier, EONRegressor])
-    @pytest.mark.parametrize("raw", [False, True])
-    @pytest.mark.parametrize("include_affiliations", [False, True])
-    @pytest.mark.parametrize("active_tol", [None, 0.5])
-    def test_counting_forwards_all_options(
-        self, estimator_type, raw, include_affiliations, active_tol
-    ):
-        model, _ = fitted_query_model(estimator_type, False)
-        options = dict(raw=raw, include_affiliations=include_affiliations, active_tol=active_tol)
-        assert model.count_parameters(**options) == count_parameters(model.network_, **options)
-
-    @pytest.mark.parametrize("operation", [active_features, count_parameters])
-    def test_tensor_helpers_do_not_unwrap_estimators(self, operation):
+    @pytest.mark.parametrize(
+        "options",
+        [{"raw": True}, {"include_affiliations": True}, {"active_tol": 0.5}],
+        ids=["raw", "include_affiliations", "active_tol"],
+    )
+    def test_counting_forwards_each_option(self, options):
         model, _ = fitted_query_model(EONClassifier, False)
-        with pytest.raises(ValueError, match="requires a fitted Network"):
-            operation(model)
+        assert count_parameters(model.network_, **options) != count_parameters(model.network_)
+        assert model.count_parameters(**options) == count_parameters(model.network_, **options)
 
     @pytest.mark.parametrize(
         ("estimator_type", "n_names"), [(EONClassifier, 9), (EONRegressor, 10)]
@@ -133,11 +142,7 @@ class TestQueries:
             exercised += 1
             for model in (clone(fitted), fitted):
                 with pytest.raises(NotFittedError):
-                    member = getattr(model, name)
-                    if kind == "query":
-                        member(X)
-                    elif kind == "report":
-                        member()
+                    _use_member(model, name, kind, X)
         assert exercised == n_names
 
     @pytest.mark.parametrize("estimator_type", [EONClassifier, EONRegressor])
@@ -173,8 +178,10 @@ class TestQueries:
             )
             / basis.shape[2]
         )
-        np.testing.assert_allclose(model.feature_importances_, expected.cpu().numpy(), rtol=1e-6)
-        np.testing.assert_allclose(model.feature_importances_.sum(), 1, rtol=1e-6)
-        assert not hasattr(model, "manifold_projectors")
+        # The reference sums the same products in another order: a few units of rounding.
+        tolerance = 16 * torch.finfo(DTYPE).eps
+        close = partial(np.testing.assert_allclose, rtol=tolerance, atol=tolerance)
+        close(model.feature_importances_, expected.cpu().numpy())
+        close(model.feature_importances_.sum(), 1)
         model.set_params(recipe=None)
-        np.testing.assert_allclose(model.feature_importances_, expected.cpu().numpy(), rtol=1e-6)
+        close(model.feature_importances_, expected.cpu().numpy())

@@ -3,9 +3,12 @@ from dataclasses import replace
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET
 from network._fixtures import resume_case
 
 from entlearn import Coupling, Hidden, Network, Recipe
+
+pytestmark = FIXED_BUDGET
 
 
 class TestCapture:
@@ -17,7 +20,7 @@ class TestCapture:
         name = recipe.blocks[0].name
         assert state.input_geometry.captured and not state.input_geometry.prefix_reusable
         assert state.input_geometry.input == replace(
-            recipe.blocks[0], K=dict(source.schema.K_active)[name]
+            source.recipe.blocks[0], K=dict(source.schema.K_active)[name]
         )
         assert state.connection_sub_seeds == source.initial_state.connection_sub_seeds
         torch.testing.assert_close(
@@ -52,7 +55,6 @@ class TestCapture:
         with torch.inference_mode():
             state.input_geometry.continuous_centroids.add_(10)
         torch.testing.assert_close(source.predict(X, X_cat=cats), before, rtol=0, atol=0)
-        assert source.capture_current_state() is not source.initial_state
 
     @pytest.mark.parametrize("kind", ["standard", "manifold"])
     @pytest.mark.parametrize("offset", [-1, 1])

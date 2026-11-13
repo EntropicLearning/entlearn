@@ -2,13 +2,14 @@
 
 ## Small data
 
-**Big data** refers to having many observations, for a certain number of features. 
-In many real world cases, however, a problem may have many features and few observations. 
-In this case, which we denote as **small data**, traditional ML methods may struggle with generalisation. 
+**Big data** refers to having many observations relative to the number of features of the data.
+In many real world cases, however, a problem may have many features and only few observations.
+In this case, which we denote as **small data**, conventional machine learning (ML) methods may struggle with generalisation.
 
 Consider the following synthetic example, based on a bioinformatics problem.
-100 genes (features) have been measured, and we know there is a way to easily distinguish which point should be blue or orange. This can be done by looking at two features only.
-You can use the sliders to select two dimensions to plot. Can you spot which features are the relevant ones?
+100 genes (features) have been measured, and we _know_ there is a way to easily distinguish which point should be one class or the other (_blue_ vs _orange_) by looking at two features only.
+
+Assume the model's perspective: you can use the sliders to select two dimensions to plot. Can you spot which features are the relevant ones?
 
 <div class="eon-figure" id="hidden-dimensions"></div>
 
@@ -16,14 +17,13 @@ You can use the sliders to select two dimensions to plot. Can you spot which fea
 
     Check features **19** and **72**.
 
-This is a simple example to illustrate that even if the information is present and sufficient for perfect discrimination, it may require solving a needle in a haystack problem. 
-In the situation above, there are almost 5000 feature pairs that can be inspected, and only _one_ of them is useful.
-Few observations lead to even more accentuated issues.
+This is a simple example to illustrate that even if the information is present and sufficient for perfect discrimination, it may require solving a _"needle in a haystack"_ type of problem.
+In the situation above, there are 4950 feature pairs that can be inspected, and only _one_ of them is useful.
 
 ## Pipelining
 
-Traditional ML methods involve combining different steps in a sequence, or _pipeline_.
-For the high-dimensional example described above, for instance, Principal Component Analysis could be applied to the data, before passing the data to an ML algorithm.
+Conventional ML methods involve combining different steps in a sequence, or _pipeline_.
+A typical solution for the high-dimensional example described above is to apply Principal Component Analysis (PCA) before passing the data to the ML algorithm of your choice.
 
 ```mermaid
 block-beta
@@ -34,47 +34,53 @@ block-beta
   ML --> Output
 ```
 
-However, PCA and the ML algorithm are not intrinsically linked: the former is an unsupervised technique, and as such it is not aware of the downstream classification task. 
-Important information could be hidden in dimensions with small variance, which are dropped by PCA.
-  
-Consider the narrow cloud below. The blue and orange points differ across its short direction, while both classes have the same distribution along its long direction.
-PCA with one component keeps the latter, as it explains most of the variance. 
-The projected classes then overlap, while the discarded component would have been able to separate them.
+However, PCA and the ML algorithm are not intrinsically linked: the former is an unsupervised technique, and as such it is not aware of the downstream classification task.
+Important information could be hidden in dimensions with small variance, which are dropped by PCA when truncating.
+
+Consider the dataset illustrated below. The blue and orange points differ across the "minor axis" (i.e., the low variance direction), while both classes have the same distribution along its "major axis" (dotted line in the plot).
+PCA with one component keeps the latter, as it explains most of the variance.
+The projected classes then overlap, while the discarded component would have retained the information needed to separate them.
 
 <div class="eon-figure" id="pca-label-loss"></div>
 
 ## What is entropic learning?
 
-Entropic learning is a framework that originated from the work of Prof. Horenko's lab.
-The idea is simple: all the steps can be combined as a single optimisation problem.
-For example, if feature selection is included in the ML algorithm, there is no need for a separate and blind preprocessing step.
+Entropic learning is a framework that originated from the work of Prof. Horenko's lab, originating with the Scalable Probabilistic Approximation (SPA) algorithm.
+The idea is simple: all the steps can be combined as a **single optimisation problem**.
+For example, feature selection can be included in the problem, without needing a separate preprocessing step (making it optimal with respect to the learning task).
 
-To achieve this, all parts of the learning task have to be defined mathematically.
-In the [eSPA+ paper](#espa), the following steps were combined:
+To achieve this, all parts of the task have to be defined mathematically.
 
-- Discretisation of the state space using a set of centroids
-- Bayesian labelling of the centroids
-- Identification of the relevant features
+[SPA](#spa-scalable-probabilistic-approximation) introduced a formulation to simultaneously:
+
+- Discretise the state space using a set of reference points and soft affiliations (for which K-means is an upper-bound)
+- Identify the relevant features
+
+[eSPA](#espa-entropy-optimal-spa) (entropy-optimal SPA) reformulated SPA for classification, and introduced an improved feature selection mechanism based on the principle of maximum entropy to learn a vector of feature weights. [eSPA+](#espa) employs the same upper-bound approximation to eSPA as K-means does to SPA, which can be cheaply solved using coordinate descent, where each substep has an analytical solutions (for an efficient implementation in Julia of eSPA and eSPA+ see [EntropicLearning/eSPA.jl](https://github.com/EntropicLearning/eSPA.jl)).
+
+[SPARTAN](#spartan) (not implemented in this package) replaced the Bayesian classification term in eSPA+ with piecewise-linear regressions.
+[EON](#eon-entropy-optimal-networks) generalises eSPA+ with hidden blocks, soft affiliations (with a cheaper way of including these compared to SPA) and learned instance weights, and can be applied to both classification and regression tasks.
+[EOMC](#eomc-entropy-optimal-manifold-clustering) is a related method for using linear manifolds (rather than centroids) to describe the clusters, and the package's [manifold input](manifold.md) generalises it to EON models.
 
 ### eSPA+ walkthrough
-In this section, we will describe how eSPA+ combines the three steps into a single problem. 
-Note that eSPA+ can be considered as a special case of EON, which is provided in this package, and the explanation is meant to give an idea if you have never heard of the technique.
-If you are familiar with eSPA+ or you are not afraid of jumping into the mathematics, feel free to visit the [Concepts](../concepts/index.md) pages.
+We will first describe how eSPA+ combines the three steps into a single problem rather than starting from EON, as it is a gentle introduction to the perspective used when deriving EON (in fact eSPA+ is a special case of EON), and the explanation is meant to give an idea if you have never heard of the technique.
+
+If you are already familiar with eSPA+ (or you are not afraid of jumping into the mathematics), feel free to skip to the [Concepts](../concepts/index.md) pages.
 
 Consider $T$ observations of $D$ features for a classification problem with $M$ classes.
-We will identify $K$ clusters in our model, used to represent the observations.
-In fact, the quality with which an observation can be reconstructed by the $k$th centroid $C_{k,:}$ can be measured with weighted squared distance:
+We will use $K$ clusters in our model to represent the observations.
+The quality with which an observation can be reconstructed by the $k$th centroid $C_{k,:}$ can be measured with weighted squared distance:
 
 $$
 d_{t,k} = \sum_{d=1}^D W_d (X_{t,d} - C_{k,d})^2
 $$
 
-where each feature has a non-negative weight $W_d$ and all weights sum to one.
+where each feature has a weight $W_d \in [0,1]$ and all weights sum to one.
 
 Assignment of points to clusters can be collected into a matrix $\Gamma \in \{0,1\}^{T \times K}$, where $\Gamma_{t,k} = 1$ if the $t$th point is affiliated with the $k$th cluster.
-Each cluster has a distribution over the output classes collecting the conditional probabilities $\Theta_{m,k}$ that a point in cluster $k$ belongs to the $m$th class. 
+Each cluster can be mapped to the output classes through the conditional probabilities $\Theta$, where each entry $\Theta_{m,k}$ represents the probability that a point in cluster $k$ belongs to the $m$th class.
 
-Furthermore, we can add a regularisation term on the *entropy* of $W$ to bias the solution towards more or less sparse solutions in terms of feature weights.
+Furthermore, the regularisation term on the *entropy* of the feature weights $W$ biases them to be more or less sparse.
 
 Combining everything, we can write a joint loss:
 
@@ -85,20 +91,14 @@ L = \underbrace{\frac{1}{T} \sum_{t,k} \Gamma_{t,k} d_{t,k}}_{\text{discretisati
 $$
 
 The first term captures how well the discretisation can describe the original data.
-The second term steers towards affiliations and conditional probabilities that are close to the true label probability distributions $\Pi \in [0,1]^{T \times M}$, with $\delta$ being the regularisation factor that controls the strength of this effect.
-The last term is the negative entropy. Small values of $\varepsilon_D$ concentrate the weights on a single or few features, whereas larger values result in equally weighted features.
+The second term steers towards affiliations and conditional probabilities that are close to the true label probability distributions $\Pi \in [0,1]^{T \times M}$, with $\delta$ being the regularisation factor controlling the importance of this.
+The last term is the negative entropy. Small values of $\varepsilon_D$ concentrate the weights on only a few features, whereas larger values result in more equally weighted features (effectively maximising the entropy).
 
-Training a model can be performed via coordinate descent one parameter at a time, while keeping everything else fixed. This can be performed as a sequence of **closed-form analytical solutions**, during which the loss never increases. 
+Training a model can be performed via coordinate descent one parameter at a time, keeping the others fixed, as a sequence of **closed form analytical solutions**, during which the loss is guaranteed to decrease monotonically.
 
-In the [Concepts](../concepts/index.md), this will be expanded to a general problem, which can be solved with EON.
+In the [Concepts](../concepts/index.md) this will be expanded to a more general problem, which can be solved with EON.
 
 ## Literature
-
-EON builds on a line of research in entropy-optimal methods.
-SPA solves discretisation, feature selection and prediction as one problem.
-eSPA reformulates SPA for classification, and eSPA+ is the variant of eSPA with hard affiliations.
-EON generalises eSPA+ with hidden blocks, soft affiliations and instance weights.
-EOMC is a related method for learning manifolds, and the package's [manifold input](manifold.md) generalises it to EON models.
 
 ### EON — Entropy-Optimal Networks
 
@@ -255,11 +255,6 @@ sparsification.* Proceedings of the National Academy of Sciences, 119(9), e21196
       doi     = {10.1073/pnas.2119659119}
     }
     ```
-
-### Julia reference implementation
-
-[EntropicLearning/eSPA.jl](https://github.com/EntropicLearning/eSPA.jl) — a Julia
-implementation of eSPA and eSPA+.
 
 ## Where to go next
 

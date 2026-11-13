@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
 
+from entlearn.primitives.normalise import _scratch_view
 from entlearn.primitives.softmax import (
     argmin_assign_,
-    softmax_with_temp_,
     weighted_assign_simplex_,
 )
 from entlearn.primitives.statistics import entropy_penalty_
@@ -26,42 +27,43 @@ def assign_affiliations_(
 ) -> None:
     """Assign each row to the clusters from its ``(T, K)`` assignment cost.
 
-    A hard block takes the minimum-cost cluster. A soft block takes the softmax at
-    ``epsilon / T`` under uniform sample weights; otherwise row ``t`` takes it at
-    ``epsilon · sample_weights[t]``. The block's resolved regime picks the route, so a
-    per-row temperature below machine precision still takes the softmax.
+    A hard block takes the minimum-cost cluster. A soft block gives row ``t`` the softmax
+    at ``epsilon · sample_weights[t]``, which is ``epsilon / T`` under uniform sample
+    weights. A positive ``epsilon`` stays soft even where that product underflows.
     """
+    # The head caches sums over its source's affiliations; mark them for recomputation
+    session.graph.head.target_sums_fresh = False
     workspace = session.workspace
     if not block.soft_assignments:
-        argmin_assign_(gamma, cost, 1, workspace.row_indices)
-    elif session.uniform_sample_weights:
-        tau = block.description.epsilon / session.data.X_cont.shape[0]
-        softmax_with_temp_(gamma, cost, tau, 1, workspace.row_keepdim)
-    else:
-        weighted_assign_simplex_(
-            gamma,
-            cost,
-            block.description.epsilon,
-            session.data.sample_weights,
-            workspace.row_keepdim,
-            workspace.row_indices,
-        )
+        argmin_assign_(gamma, cost, 1, workspace.row_keepdim, workspace.row_indices)
+        return
+    weighted_assign_simplex_(
+        gamma,
+        cost,
+        block.effective_epsilon,
+        session.data.sample_weights if session.uniform_weight is None else session.uniform_weight,
+        workspace.row_keepdim,
+        workspace.row_indices,
+    )
 
 
 def affiliation_entropy_(
     gamma: torch.Tensor, block: _ClusteringBlock, session: _FitSession
-) -> None:
-    """Add the sample-weighted affiliation entropy at the block's assignment temperature."""
+) -> float:
+    """Add the sample-weighted affiliation entropy at the block's assignment temperature.
+
+    Returns the penalty's largest magnitude, ``epsilon log K``; zero for a hard block.
+    """
     if not block.soft_assignments:
-        return
-    epsilon = block.description.epsilon
+        return 0.0
+    epsilon = block.effective_epsilon
     workspace = session.workspace
-    log_buffer = workspace.log_matrix[:, : gamma.shape[1]]
-    if session.uniform_sample_weights:
+    log_buffer = _scratch_view(workspace.log_matrix, gamma.shape[1])
+    if session.uniform_weight is not None:
         entropy_penalty_(
             workspace.loss,
             gamma,
-            epsilon / session.data.X_cont.shape[0],
+            epsilon * session.uniform_weight,
             log_buffer,
             workspace.scalar,
         )
@@ -74,3 +76,4 @@ def affiliation_entropy_(
             workspace.scalar,
             row_weights=session.data.sample_weights,
         )
+    return epsilon * math.log(gamma.shape[1])

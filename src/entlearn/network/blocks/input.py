@@ -22,6 +22,7 @@ from entlearn.network.state import InitialState, _input_width
 from entlearn.network.transfer import copy_log, copy_tensor
 from entlearn.network.validation import _validate_prediction_features
 from entlearn.primitives.centroids import (
+    _ONE_HOT_BATCHES,
     compute_gamma_wt_,
     compute_wd_cost_categorical_,
     compute_wd_cost_euclidean_,
@@ -30,65 +31,106 @@ from entlearn.primitives.centroids import (
 )
 from entlearn.primitives.distance import (
     assemble_categorical_cost_,
-    assemble_euclidean_cost_,
     refresh_weighted_norm_,
     weighted_sq_distance_,
     weighted_sq_norm_,
 )
-from entlearn.primitives.normalise import _eps, _is_soft, floored_log_
+from entlearn.primitives.normalise import _is_soft, _scratch_view, floored_log_
 from entlearn.primitives.softmax import assign_simplex_
 from entlearn.primitives.statistics import entropy_penalty_
-from entlearn.recipe import Input
+from entlearn.recipe import Input, Recipe
 
 if TYPE_CHECKING:
     from entlearn.network.session import _FitSession, _Workspace
 
 
-def _categorical_channel_scale(delta_cat: float, cardinality: int) -> float:
+def _categorical_channel_scale(delta_cat: float | None, cardinality: int) -> float:
     """Return a categorical channel's cardinality-adjusted scale."""
+    assert delta_cat is not None  # fitting fills an omitted value when there are categories
     return delta_cat * (1.0 - 1.0 / cardinality) / math.log(cardinality)
+
+
+def _guess_delta_cat(
+    X: torch.Tensor, X_cat: Sequence[torch.Tensor], weights: torch.Tensor | None
+) -> float | None:
+    """Return the median continuous variance divided by the median scaled categorical entropy.
+
+    ``None`` when no continuous feature varies or no categorical feature has at least two levels.
+    """
+    w = torch.ones(X.shape[0], dtype=X.dtype, device=X.device) if weights is None else weights
+    w = w / w.max()  # keeps the sums below finite
+    total = w.sum()
+    mean = w @ X / total
+    variances = (w @ (X - mean).square_() / total)[X.amax(0) > X.amin(0)]
+    w_cpu = w.cpu()  # code masses are summed on the CPU, where index_add_ repeats
+    costs = []
+    for feature in X_cat:
+        if feature.ndim == 1:
+            masses = torch.zeros(int(feature.max()) + 1, dtype=X.dtype)
+            masses = masses.index_add_(0, feature.cpu(), w_cpu).to(X.device)
+        else:  # rows of level distributions
+            masses = w @ feature
+        frequencies = masses[masses > 0] / total  # the levels present
+        if frequencies.numel() > 1:
+            entropy = -float((frequencies * frequencies.log()).sum())
+            costs.append(_categorical_channel_scale(1.0, frequencies.numel()) * entropy)
+    if variances.numel() == 0 or not costs:
+        return None
+    # quantile, unlike median, averages the two middle values of an even count
+    cost = torch.tensor(costs, dtype=X.dtype, device=X.device).quantile(0.5)
+    return float(variances.quantile(0.5) / cost)
+
+
+def _resolve_delta_cat(recipe: Recipe, data: _StagedData) -> Recipe:
+    """Fill an omitted ``delta_cat`` from categorical training rows, or with ``1`` when undefined."""
+    block = next((b for b in recipe.blocks if isinstance(b, Input) and b.delta_cat is None), None)
+    if block is None or not data.X_cat:
+        return recipe
+    guess = _guess_delta_cat(data.X_cont, data.X_cat, data.raw_sample_weights)
+    return recipe.replace_block(block.name, delta_cat=1.0 if guess is None else guess)
 
 
 @dataclass
 class _InputCache:
     """Data-dependent caches and local scratch for one input-block fit.
 
-    Pruning compacts ``sqdist``, ``disc_cost`` and ``categorical_cost`` to active K.
-    Other cluster-indexed scratch retains its initial capacity K_max and is sliced
-    to the active cluster count.
+    Pruning compacts ``disc_cost`` to active K, because it is the one cache that is read after pruning and before being refreshed. Other cluster-indexed scratch keeps the
+    size K_max staged for the fit, and steps read contiguous views of the active cluster
+    count.
     """
 
     X_sq: torch.Tensor  # (T, D_cont) elementwise X², the weighted norm's input
-    sqdist: torch.Tensor | None  # (T, K) ‖x_t - C_k‖²_Wd
-    disc_cost: torch.Tensor  # (T, K) total Wt-weighted discretisation error
-    categorical_cost: torch.Tensor | None  # (T, K) Σ_i scale_i·xent_i
+    disc_cost: torch.Tensor  # (T, K) discretisation error per row and cluster, not multiplied by Wt
     X_sq_weighted: torch.Tensor | None  # (T,) Σ_d Wd[d]·X[t,d]²
-    weighted_gamma: torch.Tensor | None  # (T, K_max) Γ ∘ Wt, the shared update statistic
+    weighted_gamma: torch.Tensor | None  # (T, K_max) Γ ∘ Wt; None when Wt is frozen and uniform
+    masses: torch.Tensor  # (K_max,) Σ_t Γ[t,k]·Wt[t], staged for the centroid step
     centroid_numerator: torch.Tensor | None  # (K_max, D_cont) (Γ∘Wt)ᵀ @ X
     categorical_numerators: tuple[torch.Tensor, ...]  # per feature (M_i, K_max) X̃_iᵀ @ (Γ∘Wt)
     feature_weight_cost: torch.Tensor  # (D,) per-feature discretisation error, the Wd cost
-    instance_weight_cost: torch.Tensor  # (T,) per-instance discretisation error, the Wt cost
+    instance_weight_cost: torch.Tensor  # (T,) Wt cost: row error with epsilon_T·log(T·w) subtracted
     scratch_KD: torch.Tensor | None  # (K_max, D_cont)
     scratch_D: torch.Tensor  # (D,)
     scratch_KM: torch.Tensor | None  # (K_max, max_i M_i)
+    code_scratch: tuple[torch.Tensor, torch.Tensor] | None  # off the CPU, with code features
+    scratch_MK: torch.Tensor  # (max_i M_i, K_max), negated scaled log centroids, transposed
     scratch_one: torch.Tensor  # (1,)
     scratch_index: torch.Tensor  # (1,) int64
     categorical_scales: torch.Tensor  # (D_cat,) delta_cat·s_i
     weighted_categorical_scales: torch.Tensor  # (D_cat,) delta_cat·s_i·Wd[D_cont+i]
+    uniform_instance_weight: float | None  # the frozen Wt when every row shares it, else None
 
     @classmethod
-    def allocate(
-        cls, block: _StandardInputBlock, data: _StagedData, *, capacity: int | None = None
-    ) -> _InputCache:
+    def allocate(cls, block: _StandardInputBlock, data: _StagedData) -> _InputCache:
         """Allocate the caches from the fitted dimensions and the operation data."""
         T, D_cont = data.X_cont.shape
         K = block.K
-        K_max = K if capacity is None else capacity
         D_cat = len(data.X_cat)
         D = D_cont + D_cat
         dtype = data.X_cont.dtype
         device = data.X_cont.device
         cardinalities = data.schema.M_cat
+        Wt = block.instance_weights
+        uniform = not math.isfinite(block.description.epsilon_T) and bool(Wt.max() == Wt.min())
         scales = torch.tensor(
             [_categorical_channel_scale(block.description.delta_cat, M_i) for M_i in cardinalities],
             dtype=dtype,
@@ -96,30 +138,40 @@ class _InputCache:
         )
         return cls(
             X_sq=data.X_cont * data.X_cont,
-            sqdist=(torch.empty(T, K, dtype=dtype, device=device) if D_cont else None),
             disc_cost=torch.empty(T, K, dtype=dtype, device=device),
-            categorical_cost=(torch.empty(T, K, dtype=dtype, device=device) if D_cat else None),
             X_sq_weighted=(torch.empty(T, dtype=dtype, device=device) if D_cont else None),
-            weighted_gamma=torch.empty(T, K_max, dtype=dtype, device=device),
+            weighted_gamma=None if uniform else torch.empty(T, K, dtype=dtype, device=device),
+            masses=torch.empty(K, dtype=dtype, device=device),
             centroid_numerator=(
-                torch.empty(K_max, D_cont, dtype=dtype, device=device) if D_cont else None
+                torch.empty(K, D_cont, dtype=dtype, device=device) if D_cont else None
             ),
             categorical_numerators=tuple(
-                torch.empty(M_i, K_max, dtype=dtype, device=device) for M_i in cardinalities
+                torch.empty(M_i, K, dtype=dtype, device=device) for M_i in cardinalities
             ),
             feature_weight_cost=torch.empty(D, dtype=dtype, device=device),
             instance_weight_cost=torch.empty(T, dtype=dtype, device=device),
-            scratch_KD=(torch.empty(K_max, D_cont, dtype=dtype, device=device) if D_cont else None),
+            scratch_KD=(torch.empty(K, D_cont, dtype=dtype, device=device) if D_cont else None),
             scratch_D=torch.empty(D, dtype=dtype, device=device),
             scratch_KM=(
-                torch.empty(K_max, max(cardinalities), dtype=dtype, device=device)
-                if D_cat
+                torch.empty(K, max(cardinalities), dtype=dtype, device=device) if D_cat else None
+            ),
+            # CUDA's atomic index_add_ varies from run to run
+            code_scratch=(
+                (
+                    torch.empty(T, max(cardinalities), dtype=dtype, device=device),
+                    torch.empty(
+                        _ONE_HOT_BATCHES * max(cardinalities) * K, dtype=dtype, device=device
+                    ),
+                )
+                if device.type != "cpu" and any(X_i.dim() == 1 for X_i in data.X_cat)
                 else None
             ),
+            scratch_MK=torch.empty(max(cardinalities, default=0), K, dtype=dtype, device=device),
             scratch_one=torch.empty(1, dtype=dtype, device=device),
             scratch_index=torch.empty(1, dtype=torch.int64, device=device),
             categorical_scales=scales,
             weighted_categorical_scales=torch.empty(D_cat, dtype=dtype, device=device),
+            uniform_instance_weight=float(Wt[0]) if uniform else None,
         )
 
 
@@ -131,8 +183,6 @@ class _StandardInputBlock:
     ``stage_cache_`` allocates it when a fit session opens and ``release_cache`` drops it
     at publication. Every step that changes a parameter must be followed by
     ``refresh_cache_`` before the cache is read again.
-
-    ``soft_assignments`` retains the training temperature gate for prediction.
     """
 
     description: Input
@@ -143,7 +193,7 @@ class _StandardInputBlock:
     categorical_centroids: tuple[torch.Tensor, ...]
     log_C_cat: tuple[torch.Tensor, ...]
     log_partition: torch.Tensor
-    soft_assignments: bool
+    partition_shift: torch.Tensor
     cache: _InputCache | None = field(default=None, repr=False)
 
     @property
@@ -153,8 +203,13 @@ class _StandardInputBlock:
 
     @property
     def effective_epsilon(self) -> float:
-        """Return the affiliation temperature of the fitted regime: zero when hard."""
-        return self.description.epsilon if self.soft_assignments else 0.0
+        """Return the affiliation temperature ``epsilon``."""
+        return self.description.epsilon
+
+    @property
+    def soft_assignments(self) -> bool:
+        """Whether the block uses softmax (positive ``epsilon``) or argmin (``epsilon=0``)."""
+        return _is_soft(self.description.epsilon)
 
     @property
     def live_cache(self) -> _InputCache:
@@ -192,7 +247,6 @@ class _StandardInputBlock:
             floored_log_(out, value)
         return cls(
             description=description,
-            soft_assignments=_is_soft(description.epsilon, data.X_cont.dtype),
             gamma=torch.empty(
                 data.X_cont.shape[0],
                 K,
@@ -207,14 +261,14 @@ class _StandardInputBlock:
             log_partition=torch.full(
                 (), torch.inf, dtype=data.X_cont.dtype, device=data.X_cont.device
             ),
+            partition_shift=torch.full(
+                (), torch.inf, dtype=data.X_cont.dtype, device=data.X_cont.device
+            ),
         )
 
-    def stage_cache_(self, data: _StagedData, *, capacity: int | None = None) -> None:
-        """Allocate this fit's cache, its cluster scratch sized for ``capacity`` clusters.
-
-        ``capacity=None`` sizes the scratch for the active clusters.
-        """
-        self.cache = _InputCache.allocate(self, data, capacity=capacity)
+    def stage_cache_(self, data: _StagedData) -> None:
+        """Allocate this fit's cache, its cluster scratch sized for the active clusters."""
+        self.cache = _InputCache.allocate(self, data)
 
     def release_cache(self) -> None:
         """Drop the cache, keeping the fitted parameters and row-bound state."""
@@ -230,7 +284,9 @@ class _StandardInputBlock:
         categories = tuple(
             copy_tensor(value, dtype, device) for value in self.categorical_centroids
         )
-        gamma, instance_weights, log_partition = copy_input_rows(self, dtype, device, row_weights)
+        gamma, instance_weights, log_partition, shift = copy_input_rows(
+            self, dtype, device, row_weights
+        )
         return replace(
             self,
             continuous_centroids=copy_tensor(self.continuous_centroids, dtype, device),
@@ -243,6 +299,7 @@ class _StandardInputBlock:
             gamma=gamma,
             instance_weights=instance_weights,
             log_partition=log_partition,
+            partition_shift=shift,
             cache=None,
         )
 
@@ -288,10 +345,6 @@ class _StandardInputBlock:
         )
         self.log_C_cat = tuple(torch.index_select(value, 0, index) for value in self.log_C_cat)
         cache.disc_cost = torch.index_select(cache.disc_cost, 1, index)
-        if cache.sqdist is not None:
-            cache.sqdist = torch.index_select(cache.sqdist, 1, index)
-        if cache.categorical_cost is not None:
-            cache.categorical_cost = torch.index_select(cache.categorical_cost, 1, index)
 
     def prepare_cache_(self, session: _FitSession) -> None:
         """Fill the staged cache from the current parameters."""
@@ -313,7 +366,6 @@ class _StandardInputBlock:
         Affiliations are updated first. The instance weights precede the staged statistics,
         because the centroid step is a ``Wt``-weighted mean.
         """
-        session.graph.accumulate_outgoing_cost_(self, self.live_cache.disc_cost, session)
         update_affiliations_(self, session)
         prune_(self, session)
         update_instance_weights_(self, session)
@@ -325,10 +377,10 @@ class _StandardInputBlock:
     def start_categorical_centroids_(self, session: _FitSession) -> None:
         """Set the categorical centroids to their exact update from the current affiliations.
 
-        A fresh fit runs this once, before its first iteration. A seed row's categorical
-        centroid is one-hot, and the floored logarithm prices every other level at about
-        ``-log(eps)``, so the first instance-weight update would keep only the rows that
-        match a seed exactly. The continuous centroids are left as they are.
+        Run once by a fresh fit. A seed row's categorical centroid is one hot, and every
+        other level is set to cost ``-log(tiny)``, so that the first instance-weight update
+        would keep only the rows exactly matching a seed. The continuous centroids are left
+        as they are.
         """
         if not session.data.X_cat:
             return
@@ -336,13 +388,22 @@ class _StandardInputBlock:
         update_all_categorical_centroids_(self, session)
         refresh_cache_(self, session)
 
-    def partial_loss_(self, session: _FitSession) -> None:
-        """Add the input block's contribution to the session loss."""
+    @property
+    def learns_feature_weights(self) -> bool:
+        """Whether the loss holds the feature-weight entropy penalty."""
+        epsilon_D = self.description.epsilon_D
+        return math.isfinite(epsilon_D) and _is_soft(epsilon_D)
+
+    def partial_loss_(self, session: _FitSession) -> float:
+        """Add the input block's contribution to the session loss.
+
+        Returns the largest magnitude of its entropy penalties, ``Σ c log n``.
+        """
         cache = self.live_cache
         workspace = session.workspace
-        discretisation_loss_(self, session)
-        eps = _eps(self.gamma.dtype)
-        if math.isfinite(self.description.epsilon_D) and self.description.epsilon_D > eps:
+        affiliations = discretisation_loss_(self, session)
+        features = 0.0
+        if self.learns_feature_weights:
             entropy_penalty_(
                 workspace.loss,
                 self.feature_weights,
@@ -350,7 +411,8 @@ class _StandardInputBlock:
                 cache.scratch_D,
                 workspace.scalar,
             )
-        instance_weight_loss_(self, session)
+            features = self.description.epsilon_D * math.log(self.feature_weights.numel())
+        return affiliations + instance_weight_loss_(self, session) + features
 
     def price_query_rows_(
         self,
@@ -365,9 +427,7 @@ class _StandardInputBlock:
         and matrix scratch is overwritten. A query runs after publication has released
         the fit cache, so nothing is read from it.
 
-        The costs equal the fit cache's unweighted ``sqdist`` and ``categorical_cost``.
-        The total adds the categorical cost once, after every channel, where the fit's
-        weighted cost adds each channel in turn.
+        The total equals the fit's cached discretisation error.
         """
         T, D_cont = X.shape
         K = self.K
@@ -393,62 +453,46 @@ class _StandardInputBlock:
             scale = self.feature_weights[D_cont + index] * _categorical_channel_scale(
                 self.description.delta_cat, log_C_i.shape[1]
             )
-            assemble_categorical_cost_(
-                None,
-                categorical_cost,
-                workspace.matrix[:T, :K],
-                X_i,
-                log_C_i,
-                scale,
-                None,
-            )
-        if categorical_cost is not None:
-            cost.add_(categorical_cost)
+            xent = _scratch_view(workspace.matrix, K, T)
+            scratch_MK = log_C_i.new_empty(log_C_i.shape[1], K) if X_i.dim() == 1 else None
+            assemble_categorical_cost_(cost, xent, X_i, log_C_i, scale, scratch_MK)
+            categorical_cost.add_(xent)
         return cost, sqdist, categorical_cost
 
 
 def refresh_cache_(block: _StandardInputBlock, session: _FitSession) -> None:
-    """Refresh the discretisation caches from the block's current parameters."""
+    """Refresh the discretisation error from the block's current parameters."""
     cache = block.live_cache
     data = session.data
     workspace = session.workspace
     T, D_cont = data.X_cont.shape
     K = block.K
     cost = cache.disc_cost
-    cost.zero_()
     if D_cont:
-        assert cache.sqdist is not None
         assert cache.X_sq_weighted is not None
         assert cache.scratch_KD is not None
-        assemble_euclidean_cost_(
+        weighted_sq_distance_(
             cost,
-            cache.sqdist,
             data.X_cont,
             block.continuous_centroids,
-            block.feature_weights[:D_cont],
-            block.instance_weights,
             cache.X_sq_weighted,
-            cache.scratch_KD[:K],
             workspace.scratch_K[:K],
+            cache.scratch_KD[:K],
+            feature_weights=block.feature_weights[:D_cont],
         )
-    if data.X_cat:
-        assert cache.categorical_cost is not None
-        cache.categorical_cost.zero_()
-        for X_i, log_C_i, scale in zip(
-            data.X_cat,
-            block.log_C_cat,
-            cache.weighted_categorical_scales,
-            strict=True,
-        ):
-            assemble_categorical_cost_(
-                cost,
-                cache.categorical_cost,
-                workspace.matrix[:T, :K],
-                X_i,
-                log_C_i,
-                scale,
-                block.instance_weights,
-            )
+    else:
+        cost.zero_()
+    for X_i, log_C_i, scale in zip(
+        data.X_cat, block.log_C_cat, cache.weighted_categorical_scales, strict=True
+    ):
+        assemble_categorical_cost_(
+            cost,
+            _scratch_view(workspace.matrix, K, T),
+            X_i,
+            log_C_i,
+            scale,
+            cache.scratch_MK[: log_C_i.shape[1], :K],
+        )
 
 
 def stage_statistics_(block: _StandardInputBlock, session: _FitSession) -> None:
@@ -462,14 +506,15 @@ def stage_statistics_(block: _StandardInputBlock, session: _FitSession) -> None:
     workspace = session.workspace
     D_cont = data.X_cont.shape[1]
     K = block.K
-
-    assert cache.weighted_gamma is not None
-    compute_gamma_wt_(
-        cache.weighted_gamma[:, :K],
-        workspace.scratch_K[:K],
-        block.gamma,
-        block.instance_weights,
-    )
+    masses = cache.masses[:K]
+    weight = cache.uniform_instance_weight
+    if weight is None:
+        assert cache.weighted_gamma is not None
+        gamma_wt = _scratch_view(cache.weighted_gamma, K)
+        compute_gamma_wt_(gamma_wt, masses, block.gamma, block.instance_weights)
+    else:  # a uniform Wt scales the statistics of Γ, so they are formed from Γ and scaled below
+        gamma_wt = block.gamma
+        torch.sum(gamma_wt, dim=0, out=masses)
     learn_features = math.isfinite(block.description.epsilon_D)
     if D_cont:
         assert cache.centroid_numerator is not None
@@ -478,8 +523,8 @@ def stage_statistics_(block: _StandardInputBlock, session: _FitSession) -> None:
             cache.feature_weight_cost[:D_cont],
             data.X_cont,
             block.continuous_centroids,
-            cache.weighted_gamma[:, :K],
-            workspace.scratch_K[:K],
+            gamma_wt,
+            masses,
             cache.X_sq,
             cache.centroid_numerator[:K],
             workspace.scratch_T,
@@ -492,21 +537,27 @@ def stage_statistics_(block: _StandardInputBlock, session: _FitSession) -> None:
         compute_wd_cost_categorical_(
             cache.feature_weight_cost[D_cont:],
             data.X_cat,
-            cache.weighted_gamma[:, :K],
+            gamma_wt,
             block.log_C_cat,
             cache.categorical_scales,
             cache.categorical_numerators,
-            cache.scratch_KM[:K],
+            cache.scratch_KM,
             need_cost=learn_features,
+            code_scratch=cache.code_scratch,
         )
+    if weight is not None:
+        masses.mul_(weight)
+        if D_cont:
+            assert cache.centroid_numerator is not None
+            cache.centroid_numerator[:K].mul_(weight)
+        for numerator in cache.categorical_numerators:
+            _scratch_view(numerator, K).mul_(weight)
+        if learn_features:
+            cache.feature_weight_cost.mul_(weight)
 
 
 def update_feature_weights_(block: _StandardInputBlock, session: _FitSession) -> None:
-    """Update the input feature weights.
-
-    Leaves the cluster masses in ``workspace.scratch_K`` untouched, as the centroid update
-    reads them next.
-    """
+    """Update the input feature weights."""
     if not math.isfinite(block.description.epsilon_D):
         return
     cache = block.live_cache
@@ -540,27 +591,20 @@ def update_centroids_(block: _StandardInputBlock, session: _FitSession) -> None:
         update_euclidean_centroids_(
             block.continuous_centroids,
             cache.centroid_numerator[:K],
-            workspace.scratch_K[:K],
+            cache.masses[:K],
             workspace.empty_clusters[:K],
         )
-    update_all_categorical_centroids_(block, session)
+    if session.data.X_cat:
+        update_all_categorical_centroids_(block, session)
 
 
 def update_all_categorical_centroids_(block: _StandardInputBlock, session: _FitSession) -> None:
     """Update every categorical centroid from the staged numerators and cluster masses."""
-    cache = block.live_cache
-    workspace = session.workspace
     K = block.K
-    for C_i, log_C_i, numerator_i in zip(
+    update_categorical_centroids_(
         block.categorical_centroids,
         block.log_C_cat,
-        cache.categorical_numerators,
-        strict=True,
-    ):
-        update_categorical_centroids_(
-            C_i,
-            log_C_i,
-            numerator_i[:, :K],
-            workspace.scratch_K[:K],
-            workspace.empty_clusters[:K],
-        )
+        [_scratch_view(numerator, K) for numerator in block.live_cache.categorical_numerators],
+        block.live_cache.masses[:K],
+        session.workspace.empty_clusters[:K],
+    )

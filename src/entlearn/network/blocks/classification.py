@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -10,14 +10,14 @@ import torch
 from entlearn.network.data import _ClassificationSupervision, _StagedData
 from entlearn.network.state import _ClassificationParameters
 from entlearn.network.transfer import copy_log, copy_tensor
-from entlearn.primitives.normalise import floored_log_, normalise_
+from entlearn.primitives.normalise import _scratch_view, floored_log_, normalise_
 from entlearn.primitives.output import (
     classification_output_accumulate_into_source_cost_,
-    classification_output_loss_,
     geometric_probabilities_,
     propagate_classification_output_,
     update_classification_output_,
 )
+from entlearn.primitives.reductions import _chunked_product_
 from entlearn.recipe import ClassificationHead, Coupling
 
 if TYPE_CHECKING:
@@ -30,16 +30,29 @@ class _ClassificationBlock:
 
     ``weighted_target`` already carries the target, sample and class weights, so every
     call into the output primitives passes ``None`` for the effective output weights.
+    ``cache`` holds one fit's co-occurrence counts: ``stage_cache_`` allocates it when a fit
+    session opens and ``release_cache`` drops it at publication. ``initial_widths`` holds
+    the class and source cluster counts the head was created with, which fix the prior's
+    per-entry pseudocount through pruning.
     """
 
     description: ClassificationHead
     theta: torch.Tensor
     log_theta: torch.Tensor
+    initial_widths: tuple[int, int]
+    cache: torch.Tensor | None = field(default=None, repr=False)  # (M, K_source) for Πᵀ Γ
+    target_sums_fresh: bool = field(default=False, repr=False)  # cache matches the affiliations
 
     @property
     def output_width(self) -> int:
         """Return the classification output dimension (number of classes)."""
         return self.theta.shape[0]
+
+    @property
+    def pseudocount(self) -> float:
+        """Return the per-entry Dirichlet prior, scaled by the class and source-cluster counts."""
+        M, K_source = self.initial_widths
+        return (self.description.theta_alpha - 1.0) / (M * K_source)
 
     @classmethod
     def make_block(
@@ -62,7 +75,34 @@ class _ClassificationBlock:
             theta = parameters.theta.detach().clone()
         log_theta = torch.empty_like(theta)
         floored_log_(log_theta, theta)
-        return cls(description=description, theta=theta, log_theta=log_theta)
+        return cls(
+            description=description,
+            theta=theta,
+            log_theta=log_theta,
+            initial_widths=(M, K_source),
+        )
+
+    def stage_cache_(self, _data: _StagedData) -> None:
+        """Allocate this fit's co-occurrence counts for the active clusters."""
+        self.cache = torch.empty_like(self.theta)
+        self.target_sums_fresh = False
+
+    def release_cache(self) -> None:
+        """Drop the co-occurrence counts, keeping the fitted parameters."""
+        self.cache = None
+        self.target_sums_fresh = False
+
+    def target_sums(self, session: _FitSession) -> torch.Tensor:
+        """Return the co-occurrence counts ``Πᵀ Γ``, formed once per assignment."""
+        assert self.cache is not None
+        counts = _scratch_view(self.cache, self.theta.shape[1])
+        if not self.target_sums_fresh:
+            supervision = session.data.supervision
+            assert isinstance(supervision, _ClassificationSupervision)
+            gamma = session.graph.source_affiliations(self)
+            _chunked_product_(counts, supervision.weighted_target, gamma, session.workspace.matrix)
+            self.target_sums_fresh = True
+        return counts
 
     def copy_active(
         self, dtype: torch.dtype, device: torch.device, _row_weights: torch.Tensor | None
@@ -72,7 +112,8 @@ class _ClassificationBlock:
         A head holds no row-bound state, so ``_row_weights`` is not used.
         """
         theta = copy_tensor(self.theta, dtype, device)
-        return replace(self, theta=theta, log_theta=copy_log(self.log_theta, theta))
+        log_theta = copy_log(self.log_theta, theta)
+        return replace(self, theta=theta, log_theta=log_theta, cache=None, target_sums_fresh=False)
 
     def capture_parameters(self) -> _ClassificationParameters:
         """Copy the fitted class transition and its class count."""
@@ -133,25 +174,17 @@ class _ClassificationBlock:
         )
 
     def update_parameters_(self, session: _FitSession) -> None:
-        """Set the head transition matrix from the weighted target and source affiliations."""
-        data = session.data
-        supervision = data.supervision
-        assert isinstance(supervision, _ClassificationSupervision)
-        workspace = session.workspace
-        T = data.X_cont.shape[0]
+        """Set the head transition matrix from the co-occurrence counts of the source."""
         M, K = self.theta.shape
         norm_dim = 0 if self.description.coupling is Coupling.M else 1
-        norm_scratch = workspace.scratch_K[:K] if norm_dim == 0 else workspace.scratch_K[:M]
+        scratch = session.workspace.scratch_K
         update_classification_output_(
             self.theta,
             self.log_theta,
-            supervision.weighted_target,
-            session.graph.source_affiliations(self),
-            None,
-            data.labelled,
-            norm_scratch,
-            workspace.matrix[:T, :K],
+            self.target_sums(session),
+            scratch[:K] if norm_dim == 0 else scratch[:M],
             norm_dim=norm_dim,
+            pseudocount=self.pseudocount,
         )
 
     def accumulate_into_source_cost_(
@@ -169,29 +202,23 @@ class _ClassificationBlock:
             cost,
             self.log_theta,
             supervision.weighted_target,
-            session.graph.connection_into(self).delta,
+            session.graph.head_delta,
             None,
-            data.labelled,
-            session.workspace.log_matrix[:, :M],
+            _scratch_view(session.workspace.log_matrix, M),
         )
 
-    def partial_loss_(self, session: _FitSession) -> None:
-        """Add this block's classification loss to the total loss."""
-        data = session.data
-        supervision = data.supervision
-        assert isinstance(supervision, _ClassificationSupervision)
+    def partial_loss_(self, session: _FitSession) -> float:
+        """Add this block's classification loss ``-δ·⟨log θ, Πᵀ Γ + a⟩`` to the total loss.
+
+        where ``a`` is the pseudocount, absent if ``theta_alpha = 1``.
+        Returns zero: the head holds no entropy penalty.
+        """
         workspace = session.workspace
-        T = data.X_cont.shape[0]
-        M, K = self.theta.shape
-        classification_output_loss_(
-            workspace.loss,
-            self.log_theta,
-            supervision.weighted_target,
-            session.graph.source_affiliations(self),
-            session.graph.connection_into(self).delta,
-            None,
-            data.labelled,
-            workspace.matrix[:T, :M],
-            workspace.log_matrix[:, :K],
-            workspace.scalar,
-        )
+        counts = self.target_sums(session)
+        torch.dot(self.log_theta.view(-1), counts.view(-1), out=workspace.scalar)
+        workspace.loss.add_(workspace.scalar, alpha=-session.graph.head_delta)
+        pseudocount = self.pseudocount
+        if pseudocount != 0.0:
+            torch.sum(self.log_theta, dim=(0, 1), out=workspace.scalar)
+            workspace.loss.add_(workspace.scalar, alpha=-session.graph.head_delta * pseudocount)
+        return 0.0

@@ -4,10 +4,12 @@ from dataclasses import replace
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
-from network._fixtures import prediction_model
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
+from network._fixtures import prediction_model, skip_fit_iterations
 
 from entlearn import ClassificationHead, Coupling, Input, Network, PredictConfig, Recipe
+
+pytestmark = FIXED_BUDGET
 
 
 class TestPredictionSchedule:
@@ -33,7 +35,7 @@ class TestPredictionSchedule:
         eps = torch.finfo(X.dtype).eps
 
         def entropy(value):
-            return (value * value.clamp_min(eps).log()).sum()
+            return -torch.special.entr(value).sum()
 
         def outgoing(name):
             (connection,) = graph.outgoing[name]
@@ -68,14 +70,13 @@ class TestPredictionSchedule:
             cost = distances * (weights * train.shape[0])[:, None] + outgoing(graph.order[0])
             gammas[graph.order[0]] = torch.softmax(-cost / inp.description.epsilon, 1)
             per_row = (distances * gammas[graph.order[0]]).sum(1)
-            weights = torch.exp(-per_row / inp.description.epsilon_T - inp.log_partition).clamp(
-                0, 1
-            )
+            log_partition = inp.log_partition - inp.partition_shift / inp.description.epsilon_T
+            weights = torch.exp(-per_row / inp.description.epsilon_T - log_partition).clamp(0, 1)
             loss = train.shape[0] * (weights * per_row).sum()
             loss += (
                 train.shape[0]
                 * inp.description.epsilon_T
-                * (entropy(weights) + weights.sum() * (inp.log_partition - 1))
+                * (entropy(weights) + weights.sum() * (log_partition - 1))
             )
             for name in graph.order[:-1]:
                 loss += graph.blocks[name].description.epsilon * entropy(gammas[name])
@@ -107,12 +108,15 @@ class TestPredictionSchedule:
                 torch.tensor(losses, dtype=X.dtype, device=X.device),
             ),
         ]:
+            # The oracle reorders the row and cluster sums, and each softmax at temperature 0.1
+            # scales a cost's rounding by up to ten, over two cycles; 256 eps covers that with
+            # margin (the measured difference is under 2 eps in either dtype).
             torch.testing.assert_close(observed, expected, atol=256 * eps, rtol=256 * eps)
 
 
 class TestRetainedEntropy:
     @pytest.mark.parametrize("scale", [0.5, 1.5])
-    def test_input_regime_and_loss_do_not_use_query_count_to_gate_entropy(self, scale):
+    def test_input_regime_and_loss_do_not_use_query_count_to_gate_entropy(self, monkeypatch, scale):
         epsilon = scale * torch.finfo(DTYPE).eps
         X = torch.tensor([[0.0], [epsilon**0.5]], dtype=DTYPE, device=DEVICE)
         y = torch.tensor([0, 1], device=DEVICE)
@@ -121,12 +125,19 @@ class TestRetainedEntropy:
             ClassificationHead(coupling=Coupling.M),
             delta=epsilon,
         )
-        model = Network.fit(recipe, X, y, max_iter=1, predict_config=PredictConfig(epsilon_P=0))
+        config = PredictConfig(epsilon_P=0)
+        captured = Network.fit(
+            recipe, X, y, max_iter=1, predict_config=config
+        ).capture_current_state()
         # A neutral head isolates the input entropy coefficient from supervision.
-        with torch.inference_mode():
-            model._graph.input.continuous_centroids.copy_(X)
-            model._graph.head.theta.fill_(0.5)
-            model._graph.head.log_theta.fill_(torch.log(X.new_tensor(0.5)))
+        (head,) = captured.parameters
+        state = replace(
+            captured,
+            input_geometry=replace(captured.input_geometry, continuous_centroids=X.clone()),
+            parameters=(replace(head, theta=torch.full_like(head.theta, 0.5)),),
+        )
+        skip_fit_iterations(monkeypatch)
+        model = Network.fit(recipe, X, y, initial_state=state, max_iter=1, predict_config=config)
         policy = PredictConfig(predict_mode="iterative", epsilon_P=0, max_iter=2, tol=0)
         query = X.mean(0, keepdim=True)
         alone = model.predict_with_details(
@@ -136,11 +147,10 @@ class TestRetainedEntropy:
             query.repeat(16, 1), predict_config=policy, details=("affiliations", "diagnostics")
         )
         gamma = alone.affiliations["input"]
-        assert torch.count_nonzero(gamma) == (2 if scale > 1 else 1)
+        assert torch.count_nonzero(gamma) == 2
         torch.testing.assert_close(batch.affiliations["input"], gamma.expand(16, -1))
         expected = epsilon / 4 + epsilon * torch.log(X.new_tensor(2.0))
-        if scale > 1:
-            expected -= epsilon * torch.log(X.new_tensor(2.0))
+        expected -= epsilon * torch.log(X.new_tensor(2.0))
         for result in (alone, batch):
             torch.testing.assert_close(
                 X.new_tensor(result.loss_history),

@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "entlearn[plotting,rich,sklearn]",
+#     "marimo",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.24.0"
@@ -130,7 +138,7 @@ def _(mo):
     ## Calibration
 
     After the fit, the network also calibrates the temperature of its output probabilities, `epsilon_P`, on the training data. It is stored in `predict_config`.
-    It can be changed at prediction time with a `PredictConfig`, without refitting. Note that `PredictConfig()` replaces the calibrated temperature, it does not keep it.
+    It can be changed at prediction time with a `PredictConfig`, without refitting. A `PredictConfig` that leaves `epsilon_P` out keeps the calibrated temperature, pass `epsilon_P` to change it.
     """)
     return
 

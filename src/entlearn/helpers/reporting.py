@@ -74,7 +74,7 @@ def active_features(model: Network, *, tol: float = 1.0) -> torch.Tensor:
 
 
 @torch.inference_mode()
-def count_parameters(
+def count_parameters(  # noqa: C901
     model: Network,
     *,
     include_affiliations: bool = False,
@@ -86,7 +86,7 @@ def count_parameters(
     Fixed feature, instance and output weights are excluded from the count. Training
     affiliations and instance weights (if learned) count only if ``include_affiliations=True``.
 
-    By default (``raw=True``):
+    By default (``raw=False``):
     - each vector simplex has D-1 free parameters.
     - A manifold basis represents a subspace, contributing ``d * (D - d)`` freedoms per
     active cluster instead of ``D * d``. With ``alpha=0``, the centroid also

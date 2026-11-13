@@ -45,5 +45,3 @@ Lowercase $x_t$, $\gamma_t^{(n)}$ and $c_k$ denote rows of $X$, $\Gamma^{(n)}$ a
 | $\varepsilon_n$ | Block `epsilon` | Affiliation temperature |
 | $\varepsilon_D$, $\varepsilon_T$, $\varepsilon_M$ | `epsilon_D`, `epsilon_T`, `epsilon_M` | Feature-, instance- and output-weight temperatures |
 | $\varepsilon_P$ | `PredictConfig.epsilon_P` | Geometric classification read-out temperature |
-
-[Learning the model](learning.md#affiliation-temperatures) describes affiliation regimes and [weight regimes](learning.md#temperatures-and-effective-dimension). [Prediction](prediction.md#the-calibrated-output-temperature) explains the output temperature. Dtype machine precision $\epsilon$ is defined with the [numerical conventions](loss.md#logarithms-and-zeros).

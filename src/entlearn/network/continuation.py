@@ -10,22 +10,21 @@ import torch
 
 from entlearn._warnings import _warn
 from entlearn.network.blocks.hidden import _HiddenBlock
+from entlearn.network.blocks.input import _resolve_delta_cat
 from entlearn.network.blocks.input_common import update_affiliations_
-from entlearn.network.blocks.types import _ClusteringBlock
 from entlearn.network.build import _build_recipe
 from entlearn.network.data import _stage_data, _StagedData
-from entlearn.network.finalise import finalise
+from entlearn.network.finalise import complete, finalise
 from entlearn.network.fine_tune import replace_objective, validate_replacement
 from entlearn.network.fit import ConvergenceWarning, _optimise
-from entlearn.network.session import _CompiledGraph, _FitSession
+from entlearn.network.session import _FitSession
 from entlearn.network.state import (
     InitialState,
     _copy_parameter_group,
     _FittedNetwork,
-    _input_width,
     _NetworkRecord,
 )
-from entlearn.network.state_validation import resume_error, validate_parameter_state
+from entlearn.network.state_validation import resume_error
 from entlearn.network.transfer import copy_active_graph
 from entlearn.recipe import Recipe
 
@@ -41,26 +40,6 @@ def _copy_initial_state(
         else _copy_parameter_group(state.input_geometry, dtype, device),
         parameters=tuple(_copy_parameter_group(group, dtype, device) for group in state.parameters),
     )
-
-
-def _continuation_session(
-    graph: _CompiledGraph, data: _StagedData, initial_state: InitialState
-) -> _FitSession:
-    """Open a fit session over the copied graph, retaining every fitted coordinate."""
-    geometry = initial_state.input_geometry
-    assert geometry is not None
-    # Original capacities preserve the strided arithmetic used after pruning.
-    # A shared original state may be wider than the prefix used by this fit.
-    capacities = {
-        name: (
-            _input_width(geometry, graph.input.description)
-            if name == graph.order[0]
-            else block.description.K
-        )
-        for name, block in graph.blocks.items()
-        if isinstance(block, _ClusteringBlock)
-    }
-    return _FitSession.open(graph, data, capacities=capacities)
 
 
 def _continue_one(
@@ -84,10 +63,9 @@ def _continue_one(
     )
     if replacement is not None:
         replace_objective(graph, replacement, data)
-    graph.resolve_affiliation_regimes()
-    session = _continuation_session(graph, data, state)
+    session = _FitSession.open(graph, data)
     if rebuild_rows:
-        update_affiliations_(graph.input, session)
+        update_affiliations_(graph.input, session, coupled=False)
         for name in graph.order[1:-1]:
             block = graph.blocks[name]
             assert isinstance(block, _HiddenBlock)
@@ -110,16 +88,10 @@ def _continue_one(
     policy = fitted.predict_config
     if fitted.epsilon_P_source == "derived":
         policy = replace(policy, epsilon_P=None)
-    return finalise(
-        graph,
-        data,
-        trajectory,
-        policy,
-        state,
-        scoring_reference=True,
-        max_iter=max_iter,
-        tol=tol,
+    fitted, _ = complete(
+        finalise(graph, data, trajectory, policy, state, max_iter=max_iter, tol=tol), data
     )
+    return fitted
 
 
 @torch.inference_mode()
@@ -147,7 +119,6 @@ def continue_fit(
     rebuild_rows = replacement is not None
     for candidate in (fitted, *(members or ())):
         if replacement is not None:
-            validate_parameter_state(candidate)
             validate_replacement(candidate, replacement)
         else:
             error = resume_error(candidate)
@@ -172,6 +143,8 @@ def continue_fit(
         computation_dtype=computation_dtype,
         fitted_schema=fitted.schema,
     )
+    if replacement is not None:
+        replacement = _resolve_delta_cat(replacement, data)
     winner = record.winner
     original_states = (fitted.initial_state,) if states is None else states
     copied_states = tuple(

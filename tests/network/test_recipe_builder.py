@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+from conftest import DEVICE, DTYPE
 from network._fixtures import link
 from network._recipe_stubs import UnreadableData
 
@@ -81,7 +82,7 @@ class TestRecipeBuilder:
         ids=("skip", "join", "multiple-inputs", "multiple-heads", "disconnected"),
     )
     def test_rejects_future_topologies_before_data_access(self, recipe):
-        with pytest.raises(ValueError, match="the builder only supports one connected chain"):
+        with pytest.raises(ValueError, match="one connected chain"):
             Network.initialise(recipe, UnreadableData(), UnreadableData())
 
     def test_builds_a_non_topological_recipe_with_stable_public_identity(self):
@@ -97,12 +98,11 @@ class TestRecipeBuilder:
             link("upstream", "downstream", coupling=Coupling.S, theta_alpha=1.0),
         )
         recipe = Recipe(blocks=blocks, connections=connections)
-        X_cont = torch.arange(12, dtype=torch.float64).reshape(6, 2) / 16
-        y = torch.tensor([0, 1, 0, 1, 0, 1])
+        X_cont = torch.arange(12, dtype=DTYPE, device=DEVICE).reshape(6, 2) / 16
+        y = torch.tensor([0, 1, 0, 1, 0, 1], device=DEVICE)
 
         state = Network.initialise(recipe, X_cont, y, seed=5)
 
-        assert recipe.blocks == blocks
         assert state.input_geometry.input == blocks[2]
         assert state.input_geometry.K_active == 3
         assert tuple(name for name, _ in state.connection_sub_seeds) == tuple(

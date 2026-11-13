@@ -8,18 +8,20 @@ from _alloc import assert_zero_alloc
 from conftest import DEVICE, DTYPE
 
 from entlearn.primitives.centroids import (
+    _ONE_HOT_BATCHES,
     compute_gamma_wt_,
     compute_wd_cost_categorical_,
     compute_wd_cost_euclidean_,
     update_categorical_centroids_,
     update_euclidean_centroids_,
 )
+from entlearn.primitives.normalise import _tiny
 from primitives._fixtures import SEEDS, assert_close, empty, generator, rand, randn, stochastic
 
 SHAPES = [(7, 4, 3), (10, 1, 4), (6, 3, 1), (5, 5, 5)]  # (T, D, K); K <= T
-CAT_SHAPES = [(7, 3, 4), (10, 4, 2), (6, 2, 5), (5, 5, 3)]  # (T, K, M_d)
-# (T, K, [M_d for each feature]); the first feature is always int-coded, the
-# rest are distributions, so every case mixes both X̃ representations.
+CAT_SHAPES = [(7, 3, [4, 2]), (10, 4, [2]), (6, 2, [5, 3, 4]), (5, 5, [3, 2])]  # (T, K, [M_d])
+# (T, K, [M_d for each feature]); features 0, 2, … are int-coded and the others are
+# distributions, so the cases mix both X̃ representations and several code features.
 WD_CAT_SHAPES = [
     (7, 3, [4, 2]),
     (10, 4, [3, 5, 2]),
@@ -59,12 +61,11 @@ def _ref(X, C, gamma_wt):
 
 
 def _ref_update(numer, denom):
-    """Naive implementation of update_euclidean_centroids_: numer/denom, empty (mass <= eps) -> 0."""
-    eps = torch.finfo(numer.dtype).eps
+    """Naive implementation of update_euclidean_centroids_: numer/denom, mass <= tiny -> 0."""
     K, D = numer.shape
     C = torch.zeros(K, D, dtype=numer.dtype)
     for k in range(K):
-        if float(denom[k]) > eps:
+        if float(denom[k]) > _tiny(numer.dtype):
             for d in range(D):
                 C[k, d] = float(numer[k, d]) / float(denom[k])
     return C
@@ -83,33 +84,33 @@ def _ref_inputs(gamma, Wt):
     return gamma_wt, denom
 
 
-def _make_cat(T, K, M, *, seed):
-    """Realistic categorical numerator + mass with Σ_m numerator[m,k] = denom[k]."""
+def _make_cat(T, K, M_list, *, seed):
+    """Realistic categorical numerators + mass with Σ_m numerator_i[m,k] = denom[k]."""
     g = generator(seed)
     gamma = stochastic(T, K, dim=1, g=g)
     Wt = rand(T, g=g)
     gamma_wt = gamma * Wt[:, None]
-    x_tilde = stochastic(M, T, dim=0, g=g)  # left-stochastic columns (Σ_m = 1)
-    cat_numerator = x_tilde @ gamma_wt  # (M, K)
+    # left-stochastic columns (Σ_m = 1) times gamma_wt: one (M_d, K) numerator per feature
+    cat_numerators = [stochastic(M, T, dim=0, g=g) @ gamma_wt for M in M_list]
     denom = gamma_wt.sum(0)  # (K,)
-    return cat_numerator, denom
+    return cat_numerators, denom
 
 
 def _ref_cat_centroids(cat_numerator, denom, M):
     """Naive implementation of update_categorical_centroids_: normalise + log-refresh."""
-    eps = torch.finfo(cat_numerator.dtype).eps
+    tiny = _tiny(cat_numerator.dtype)
     K = denom.shape[0]
     C_cat = torch.zeros(K, M, dtype=cat_numerator.dtype)
     logC = torch.zeros(K, M, dtype=cat_numerator.dtype)
     for k in range(K):
-        if float(denom[k]) > eps:
+        if float(denom[k]) > _tiny(cat_numerator.dtype):
             for m in range(M):
                 C_cat[k, m] = float(cat_numerator[m, k]) / float(denom[k])
         else:
             for m in range(M):
                 C_cat[k, m] = 1.0 / M  # uniform empty fallback
         for m in range(M):
-            logC[k, m] = math.log(max(float(C_cat[k, m]), eps))
+            logC[k, m] = math.log(max(float(C_cat[k, m]), tiny))
     return C_cat, logC
 
 
@@ -176,11 +177,19 @@ class TestComputeWdCostEuclidean:
         torch.testing.assert_close(buf["Wd_cost_slice"], sentinel, rtol=0, atol=0)
 
 
-def _make_wd_cat(T, K, M_list, *, seed):
-    """Build a per-feature X_cat list mixing one int-code feature and >=1 distribution.
+def _code_scratch(T, max_M, K_max):
+    """Return NaN-filled workspaces for summing codes in a fixed order."""
+    return (
+        torch.full((T, max_M), torch.nan, dtype=DTYPE, device=DEVICE),
+        torch.full((_ONE_HOT_BATCHES * max_M * K_max,), torch.nan, dtype=DTYPE, device=DEVICE),
+    )
 
-    Feature 0 is a ``(T,)`` long tensor of integer codes; the remaining features
-    are ``(T, M_d)`` row-normalised simplex distributions. Also builds gamma_wt,
+
+def _make_wd_cat(T, K, M_list, *, seed):
+    """Build a per-feature X_cat list alternating int-code features and distributions.
+
+    Features 0, 2, … are ``(T,)`` long tensors of integer codes; the others are
+    ``(T, M_d)`` row-normalised simplex distributions. Also builds gamma_wt,
     the per-feature logC_cat_list, combined_scales, the output buffers, and the
     ``(K, max M_d)`` Frobenius-product scratch.
     """
@@ -192,7 +201,7 @@ def _make_wd_cat(T, K, M_list, *, seed):
     logC_cat_list = []
     cat_numerator_list = []
     for i, M in enumerate(M_list):
-        if i == 0:  # int-code feature
+        if i % 2 == 0:  # int-code feature
             X_cat.append(torch.randint(0, M, (T,), generator=g, device=DEVICE))  # (T,) long
         else:  # distribution feature
             X_cat.append(stochastic(T, M, dim=1, g=g))  # row-stochastic simplex
@@ -267,21 +276,53 @@ class TestComputeWdCostCategorical:
         for num_i, num_ref_i in zip(cat_numerator_list, numer_ref, strict=True):
             assert_close(num_i, num_ref_i)
 
-    def test_writes_only_the_active_columns_of_larger_numerator_buffers(self):
-        buffers = list(_make_wd_cat(7, 3, [4, 2], seed=0))
+    # One-hot rows in row batches: fewer rows than batches, whole batches and a remainder,
+    # and whole batches only
+    @pytest.mark.parametrize("shape", [WD_CAT_SHAPES[1], (600, 3, [4, 2]), (512, 4, [3, 5])])
+    def test_codes_summed_in_a_fixed_order_match_the_reference(self, shape):
+        T, K, M_list = shape
+        buffers = list(_make_wd_cat(T, K, M_list, seed=SEEDS[0]))
+        code_scratch = _code_scratch(T, max(M_list), K)
+
+        assert_zero_alloc(compute_wd_cost_categorical_, *buffers, code_scratch=code_scratch)
+
+        slice_ref, numer_ref = _ref_wd_cat(buffers[1], buffers[2], buffers[3], buffers[4])
+        assert_close(buffers[0], slice_ref)
+        for num_i, num_ref_i in zip(buffers[5], numer_ref, strict=True):
+            assert_close(num_i, num_ref_i)
+
+    @pytest.mark.parametrize("summed_in_order", [False, True])
+    def test_fills_the_leading_elements_of_larger_buffers(self, summed_in_order):
+        buffers = list(_make_wd_cat(7, 3, [4, 2, 3], seed=0))
         original = buffers[5]
         numerators = [
             torch.full((value.shape[0], 5), torch.nan, dtype=DTYPE, device=DEVICE)
             for value in original
         ]
         buffers[5] = numerators
+        buffers[6] = torch.full((5, 4), torch.nan, dtype=DTYPE, device=DEVICE)  # 5 > K rows
+        code_scratch = _code_scratch(7, 4, 5) if summed_in_order else None
 
-        assert_zero_alloc(compute_wd_cost_categorical_, *buffers)
+        assert_zero_alloc(compute_wd_cost_categorical_, *buffers, code_scratch=code_scratch)
 
-        _, expected = _ref_wd_cat(buffers[1], buffers[2], buffers[3], buffers[4])
+        costs, expected = _ref_wd_cat(buffers[1], buffers[2], buffers[3], buffers[4])
+        assert_close(buffers[0], costs)
         for actual, reference in zip(numerators, expected, strict=True):
-            assert_close(actual[:, :3], reference)
-            assert torch.isnan(actual[:, 3:]).all()
+            filled = reference.numel()
+            assert_close(actual.view(-1)[:filled].view(reference.shape), reference)
+            assert torch.isnan(actual.view(-1)[filled:]).all()
+
+    @pytest.mark.parametrize("operand", ["numerator", "scratch_KM"])
+    def test_a_strided_buffer_is_refused(self, operand):
+        buffers = list(_make_wd_cat(7, 3, [4, 2], seed=0))
+        if operand == "numerator":
+            buffers[5] = [torch.empty(4, 6, dtype=DTYPE, device=DEVICE)[:, :5], buffers[5][1]]
+            shape = r"shape \(4, 5\)"
+        else:
+            buffers[6] = torch.empty(3, 6, dtype=DTYPE, device=DEVICE)[:, :4]
+            shape = r"shape \(3, 4\)"
+        with pytest.raises(ValueError, match=rf"{shape} .* not contiguous"):
+            compute_wd_cost_categorical_(*buffers)
 
     def test_frozen_feature_weights_still_stage_the_complete_numerators(self):
         T, K, M_list = WD_CAT_SHAPES[0]
@@ -310,34 +351,31 @@ class TestUpdateEuclideanCentroids:
         assert_zero_alloc(update_euclidean_centroids_, C_out, numer, denom, mask)
         assert_close(C_out, _ref_update(numer, denom))
 
-    def test_empty_cluster_zeroed(self):
-        K, D = 3, 4
-        g = generator(11)
-        numer = randn(K, D, g=g)
-        denom = rand(K, g=g)
-        numer[1] = 0.0  # cluster 1 carries no mass: numer and denom both vanish
-        denom[1] = 0.0
-        C_out = empty(K, D)
-        mask = torch.empty(K, dtype=torch.bool, device=DEVICE)
-        update_euclidean_centroids_(C_out, numer, denom, mask)
-        assert torch.all(C_out[1] == 0.0)
-        assert_close(C_out[0], numer[0] / denom[0])
-        assert_close(C_out[2], numer[2] / denom[2])
+    def test_the_numerator_may_be_divided_in_place(self):
+        numer = torch.tensor([[2.0, 4.0], [3.0, 9.0], [1.0, 1.0]], dtype=DTYPE, device=DEVICE)
+        denom = torch.tensor([2.0, 3.0, 0.0], dtype=DTYPE, device=DEVICE)
+        expected = torch.tensor([[1.0, 2.0], [1.0, 3.0], [0.0, 0.0]], dtype=DTYPE, device=DEVICE)
+        mask = torch.empty(3, dtype=torch.bool, device=DEVICE)
 
-    def test_sub_eps_mass_zeroed(self):
-        # A cluster with tiny-but-nonzero mass (0 < denom <= eps) and a nonzero
-        # numerator must hit the empty fallback (zero centroid), not the huge
-        # numer/tiny-denom quotient. Exercises the denom <= eps threshold.
-        K, D = 3, 4
-        g = generator(13)
-        numer = randn(K, D, g=g)
-        denom = rand(K, g=g)
-        denom[1] = torch.finfo(DTYPE).eps / 2  # in the (0, eps] band
-        C_out = empty(K, D)
-        mask = torch.empty(K, dtype=torch.bool, device=DEVICE)
-        update_euclidean_centroids_(C_out, numer, denom, mask)
-        assert torch.all(C_out[1] == 0.0)  # sub-eps mass -> zeroed, not numer/denom
-        assert_close(C_out, _ref_update(numer, denom))
+        update_euclidean_centroids_(numer, numer, denom, mask)
+
+        torch.testing.assert_close(numer, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("scale", [0.0, 0.5, 1.0, 2.0])
+    def test_tiny_mass_uses_the_fallback_without_changing_the_mass(self, scale):
+        mass = _tiny(DTYPE) * scale
+        denom = torch.tensor([mass, 0.0], dtype=DTYPE, device=DEVICE)
+        numer = torch.tensor([[mass / 4, mass / 2], [0.0, 0.0]], dtype=DTYPE, device=DEVICE)
+        out = empty(2, 2)
+        before = denom.clone()
+        mask = torch.empty(2, dtype=torch.bool, device=DEVICE)
+
+        assert_zero_alloc(update_euclidean_centroids_, out, numer, denom, mask)
+
+        row = [0.0, 0.0] if scale <= 1 else [0.25, 0.5]
+        expected = torch.tensor([row, [0.0, 0.0]], dtype=DTYPE, device=DEVICE)
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        assert torch.equal(denom, before)
 
 
 class TestComputeCentroidInputs:
@@ -372,40 +410,29 @@ class TestUpdateCategoricalCentroids:
     @pytest.mark.parametrize("shape", CAT_SHAPES)
     @pytest.mark.parametrize("seed", SEEDS)
     def test_matches_reference(self, shape, seed):
-        T, K, M = shape
-        cat_numerator, denom = _make_cat(T, K, M, seed=seed)
-        C_cat = empty(K, M)
-        logC = empty(K, M)
+        T, K, M_list = shape
+        cat_numerators, denom = _make_cat(T, K, M_list, seed=seed)
+        C_cat = tuple(empty(K, M) for M in M_list)
+        logC = tuple(empty(K, M) for M in M_list)
         mask = torch.empty(K, dtype=torch.bool, device=DEVICE)
-        assert_zero_alloc(update_categorical_centroids_, C_cat, logC, cat_numerator, denom, mask)
-        C_ref, logC_ref = _ref_cat_centroids(cat_numerator, denom, M)
-        assert_close(C_cat, C_ref)
-        assert_close(logC, logC_ref)
-        assert_close(C_cat.sum(1), torch.ones(K, dtype=DTYPE))  # category distributions
+        assert_zero_alloc(update_categorical_centroids_, C_cat, logC, cat_numerators, denom, mask)
+        for C_i, logC_i, numerator_i, M in zip(C_cat, logC, cat_numerators, M_list, strict=True):
+            C_ref, logC_ref = _ref_cat_centroids(numerator_i, denom, M)
+            assert_close(C_i, C_ref)
+            assert_close(logC_i, logC_ref)
+            assert_close(C_i.sum(1), torch.ones(K, dtype=DTYPE))  # category distributions
 
-    def test_empty_cluster_uniform(self):
-        T, K, M = 6, 3, 4
-        cat_numerator, denom = _make_cat(T, K, M, seed=11)
-        cat_numerator[:, 1] = 0.0  # cluster 1 carries no mass: numerator and denom vanish
-        denom[1] = 0.0
-        C_cat = empty(K, M)
-        logC = empty(K, M)
-        mask = torch.empty(K, dtype=torch.bool, device=DEVICE)
-        update_categorical_centroids_(C_cat, logC, cat_numerator, denom, mask)
-        assert_close(C_cat[1], torch.full((M,), 1.0 / M, dtype=DTYPE))
-        assert_close(logC[1], C_cat[1].log())  # log(1/M); above the floor
+    @pytest.mark.parametrize("scale", [0.0, 0.5, 1.0, 2.0])
+    def test_tiny_mass_uses_a_uniform_level_distribution(self, scale):
+        mass = _tiny(DTYPE) * scale
+        denom = torch.tensor([mass, 0.0], dtype=DTYPE, device=DEVICE)
+        numerator = torch.tensor([[mass / 4, 0.0], [3 * mass / 4, 0.0]], dtype=DTYPE, device=DEVICE)
+        C, logs = (empty(2, 2),), (empty(2, 2),)
+        mask = torch.empty(2, dtype=torch.bool, device=DEVICE)
 
-    def test_sub_eps_mass_uniform(self):
-        # A cluster with tiny-but-nonzero mass (0 < denom <= eps) must fall back
-        # to the uniform 1/M_d category distribution, not the raw numer/tiny-denom
-        # quotient. Exercises the denom <= eps threshold.
-        T, K, M = 6, 3, 4
-        cat_numerator, denom = _make_cat(T, K, M, seed=11)
-        denom[1] = torch.finfo(DTYPE).eps / 2  # in the (0, eps] band
-        C_cat = empty(K, M)
-        logC = empty(K, M)
-        mask = torch.empty(K, dtype=torch.bool, device=DEVICE)
-        update_categorical_centroids_(C_cat, logC, cat_numerator, denom, mask)
-        assert_close(C_cat[1], torch.full((M,), 1.0 / M, dtype=DTYPE))
-        assert_close(C_cat.sum(1), torch.ones(K, dtype=DTYPE))  # all rows stochastic
-        assert_close(C_cat, _ref_cat_centroids(cat_numerator, denom, M)[0])
+        assert_zero_alloc(update_categorical_centroids_, C, logs, (numerator,), denom, mask)
+
+        row = [0.5, 0.5] if scale <= 1 else [0.25, 0.75]
+        expected = torch.tensor([row, [0.5, 0.5]], dtype=DTYPE, device=DEVICE)
+        torch.testing.assert_close(C[0], expected, rtol=0, atol=0)
+        torch.testing.assert_close(logs[0], expected.log())

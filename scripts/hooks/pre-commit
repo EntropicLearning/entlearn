@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Usage: git config core.hooksPath scripts/hooks — refuse a commit while Ruff's format or lint check fails.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+uv run --no-sync --quiet ruff format --check . && uv run --no-sync --quiet ruff check --quiet . && exit 0
+echo "pre-commit: Ruff failed. Fix with: uv run ruff format . && uv run ruff check --fix ." >&2
+exit 1

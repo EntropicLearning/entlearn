@@ -1,10 +1,37 @@
-"""Temperature softmax, hard argmin assignment, and log-partition."""
+"""Temperature softmax, hard argmin assignment, and the log-partition of a softmax."""
 
 from __future__ import annotations
 
+import math
+
 import torch
 
-from entlearn.primitives.normalise import _is_soft
+from entlearn.primitives.normalise import _is_soft, _tiny
+
+
+def _scale_ratio_(out: torch.Tensor, numerator: float, denominator: float) -> None:
+    """Scale ``out`` by a ratio of positive scalars.
+
+    If the ratio would overflow, it is calculated in a way that ``out`` times the ratio is
+    still representable in the computation dtype.
+    """
+    tiny = _tiny(out.dtype)
+    ratio = numerator / denominator
+    if tiny <= ratio <= 1.0 / tiny:
+        out.mul_(ratio)
+        return
+    a, ea = math.frexp(numerator)
+    b, eb = math.frexp(denominator)
+    mantissa, exponent = a / b, ea - eb
+    if mantissa < 1.0:
+        mantissa *= 2.0
+        exponent -= 1
+    limit = -math.frexp(tiny)[1]
+    while abs(exponent) > limit:
+        step = limit if exponent > 0 else -limit
+        out.mul_(math.ldexp(1.0, step))
+        exponent -= step
+    out.mul_(math.ldexp(mantissa, exponent))
 
 
 def softmax_with_temp_(
@@ -13,33 +40,43 @@ def softmax_with_temp_(
     temp: float,
     dim: int,
     scratch_keepdim: torch.Tensor,
+    row_weights: torch.Tensor | float = 1.0,
 ) -> None:
-    """Write ``softmax(-cost/temp, dim)`` into ``out``.
+    """Write ``softmax(-cost / (temp · row_weights), dim)`` into ``out``.
 
-    Every slice along ``dim`` sums to 1. A slice whose exponentials are all
-    non-finite becomes the uniform ``1/N``, ``N = cost.shape[dim]``.
+    The minimum cost is subtracted before scaling. A slice whose minimum is not finite
+    becomes the uniform ``1/N``, ``N = cost.shape[dim]``. With a tensor of row weights, a
+    temperature of at least one divides before them and a smaller one after them, so with
+    weights at most one no intermediate quotient exceeds the final exponent.
 
     Args:
-        out: ``(..., N)`` output, overwritten.
-        cost: ``(..., N)`` cost tensor, read-only.
+        out: ``(..., N)`` output, overwritten. It may alias ``cost``.
+        cost: ``(..., N)`` cost tensor, read-only unless aliased.
         temp: Softmax temperature; must be finite and ``> 0``.
         dim: Axis to softmax over.
-        scratch_keepdim: ``(..., 1)`` workspace for the slice max and the normaliser.
+        scratch_keepdim: Workspace shaped like ``cost`` with ``dim`` collapsed to length one.
+        row_weights: Weights in ``(0, 1]`` on the temperature: one for every slice, or a
+            ``(T,)`` tensor when ``dim=1``.
     """
-    n = cost.shape[dim]
-    uniform = 1.0 / n
-    torch.mul(cost, -1.0 / temp, out=out)  # -cost/temp
-    torch.amax(out, dim=dim, keepdim=True, out=scratch_keepdim)  # row/col max (shift)
-    out.sub_(scratch_keepdim).exp_()  # exp(shifted)
-    torch.sum(out, dim=dim, keepdim=True, out=scratch_keepdim)  # Z
-    out.div_(scratch_keepdim)  # softmax
-    out.nan_to_num_(nan=uniform, posinf=uniform, neginf=uniform)  # all-inf slice -> uniform 1/N
+    torch.amin(cost, dim=dim, keepdim=True, out=scratch_keepdim)
+    torch.sub(scratch_keepdim, cost, out=out)  # -(cost - min), zero at the minimum
+    if not isinstance(row_weights, torch.Tensor):
+        _scale_ratio_(out, 1.0 / row_weights, temp)
+    elif temp >= 1.0:
+        _scale_ratio_(out, 1.0, temp)
+        out.div_(row_weights.unsqueeze(1))
+    else:
+        out.div_(row_weights.unsqueeze(1))
+        _scale_ratio_(out, 1.0, temp)
+    torch.softmax(out, dim, out=out)
+    out.nan_to_num_(nan=1.0 / cost.shape[dim])  # an infinite minimum (inf - inf) -> uniform
 
 
 def argmin_assign_(
     out: torch.Tensor,
     cost: torch.Tensor,
     dim: int,
+    scratch_keepdim: torch.Tensor,
     scratch_idx: torch.Tensor,
 ) -> None:
     """Write a one-hot at the minimum of ``cost`` along ``dim`` into ``out``.
@@ -49,39 +86,43 @@ def argmin_assign_(
     Args:
         out: ``(..., N)`` output, overwritten.
         cost: ``(..., N)`` cost tensor, read-only.
-        dim: Axis to take the argmin over.
-        scratch_idx: ``(..., 1)`` int64 workspace for the argmin index.
+        dim: Axis to take the minimum over.
+        scratch_keepdim: ``(..., 1)`` workspace for the minimum.
+        scratch_idx: ``(..., 1)`` int64 workspace for its index.
     """
-    torch.argmin(cost, dim=dim, keepdim=True, out=scratch_idx)
+    torch.min(cost, dim=dim, keepdim=True, out=(scratch_keepdim, scratch_idx))
     out.zero_()
     out.scatter_(dim, scratch_idx, 1.0)
 
 
 def compute_log_partition_(
-    out_scalar: torch.Tensor,
+    out_log_sum: torch.Tensor,
+    out_shift: torch.Tensor,
     b: torch.Tensor,
     temp: float,
     scratch_T: torch.Tensor,
-    scratch_scalar: torch.Tensor,
 ) -> None:
-    """Write the log-partition ``logsumexp_t(-b/temp)`` into ``out_scalar``.
+    """Write the log-partition ``log Σ_t exp(-b[t]/temp)`` in two finite parts.
 
-    Computes ``m + log Σ_t exp(u[t] - m)`` with ``u = -b/temp`` and ``m = max_t u``,
-    over the ``(T,)`` vector ``b``. ``out_scalar`` is overwritten, not added into.
+    The log-partition is ``out_log_sum - out_shift/temp``, with the shift
+    ``out_shift = min_t b[t]`` and ``out_log_sum = log Σ_t exp(-(b[t] - out_shift)/temp)``
+    in ``[0, log T]``. Both parts are finite at any positive temperature, where the
+    log-partition itself can overflow, and the softmax weight of a cost ``b`` is
+    ``exp(-(b - out_shift)/temp - out_log_sum)``. Both outputs are overwritten.
 
     Args:
-        out_scalar: ``()`` output, overwritten.
-        b: ``(T,)`` cost vector, read-only. ``T >= 1``.
+        out_log_sum: ``()`` output, overwritten with the shifted log-sum.
+        out_shift: ``()`` output, overwritten with the smallest cost.
+        b: ``(T,)`` finite cost vector, read-only. ``T >= 1``.
         temp: Softmax temperature; must be finite and ``> 0``.
         scratch_T: ``(T,)`` workspace for the shifted exponentials.
-        scratch_scalar: ``()`` workspace for the max ``m``.
     """
-    torch.mul(b, -1.0 / temp, out=scratch_T)  # u = -b/temp
-    torch.amax(scratch_T, dim=0, out=scratch_scalar)  # m (())
-    scratch_T.sub_(scratch_scalar).exp_()  # exp(u - m)
-    torch.sum(scratch_T, dim=0, out=out_scalar)  # Σ exp(u - m)
-    out_scalar.log_()  # log Σ
-    out_scalar.add_(scratch_scalar)  # + m  => log Z
+    torch.amin(b, dim=0, out=out_shift)
+    torch.sub(out_shift, b, out=scratch_T)  # -(b - min), zero at the minimum
+    _scale_ratio_(scratch_T, 1.0, temp)
+    scratch_T.exp_()
+    torch.sum(scratch_T, dim=0, out=out_log_sum)  # Σ_t exp(-(b[t] - min)/temp), in [1, T]
+    out_log_sum.log_()
 
 
 def assign_simplex_(
@@ -94,46 +135,46 @@ def assign_simplex_(
 ) -> None:
     """Assign ``cost`` onto the simplex along ``dim``: soft softmax, or hard one-hot.
 
-    Takes :func:`softmax_with_temp_` when the temperature exceeds the dtype machine
-    precision, and :func:`argmin_assign_` when it does not.
+    Applies :func:`softmax_with_temp_` at a positive temperature and :func:`argmin_assign_`
+    at zero.
 
     Args:
         out: ``(..., N)`` output, overwritten.
         cost: ``(..., N)`` cost tensor, read-only.
-        temp: Softmax temperature; must be finite and ``> 0`` on the soft route.
+        temp: Finite, non-negative softmax temperature.
         dim: Axis to assign along.
-        scratch_keepdim: ``(..., 1)`` workspace for the soft route.
+        scratch_keepdim: ``(..., 1)`` workspace for the minimum cost.
         scratch_idx: ``(..., 1)`` int64 workspace for the hard route.
     """
-    if _is_soft(temp, out.dtype):
+    if _is_soft(temp):
         softmax_with_temp_(out, cost, temp, dim, scratch_keepdim)
         return
-    argmin_assign_(out, cost, dim, scratch_idx)
+    argmin_assign_(out, cost, dim, scratch_keepdim, scratch_idx)
 
 
 def weighted_assign_simplex_(
     out: torch.Tensor,
     cost: torch.Tensor,
     temp: float,
-    row_weights: torch.Tensor,
+    row_weights: torch.Tensor | float,
     scratch_keepdim: torch.Tensor,
     scratch_idx: torch.Tensor,
 ) -> None:
     """Assign rows onto the simplex when row ``t``'s entropy carries weight ``row_weights[t]``.
 
-    Row ``t`` receives ``softmax(-cost[t] / (temp · row_weights[t]))``. A temperature at or
-    below the dtype machine precision assigns every row by hard minimum cost.
+    Row ``t`` receives ``softmax(-cost[t] / (temp · row_weights[t]))``; a float
+    ``row_weights`` is one weight shared by every row. A zero temperature assigns every
+    row by hard minimum.
 
     Args:
         out: ``(T, K)`` row-stochastic output (modified).
         cost: ``(T, K)`` weighted assignment cost, read-only.
-        temp: Raw affiliation temperature. Must be finite and ``> 0`` on the soft route.
-        row_weights: ``(T,)`` positive row weights.
-        scratch_keepdim: ``(T, 1)`` workspace (modified).
-        scratch_idx: ``(T, 1)`` int64 workspace (modified).
+        temp: Finite, non-negative affiliation temperature.
+        row_weights: ``(T,)`` row weights in ``(0, 1]``, or one such weight for every row.
+        scratch_keepdim: ``(T, 1)`` workspace for the row minimum (modified).
+        scratch_idx: ``(T, 1)`` int64 workspace for the hard assignment.
     """
-    if not _is_soft(temp, out.dtype):
-        argmin_assign_(out, cost, 1, scratch_idx)
+    if not _is_soft(temp):
+        argmin_assign_(out, cost, 1, scratch_keepdim, scratch_idx)
         return
-    torch.div(cost, row_weights.unsqueeze(1), out=out)
-    softmax_with_temp_(out, out, temp, 1, scratch_keepdim)
+    softmax_with_temp_(out, cost, temp, 1, scratch_keepdim, row_weights)

@@ -28,7 +28,7 @@ def _expected_output_weights(
 
 class TestRegressionHeadCoordinates:
     def test_seed_and_empty_clusters_use_weighted_mean(self) -> None:
-        X_cont = torch.arange(4, dtype=DTYPE, device=DEVICE).unsqueeze(1)
+        X_cont = torch.arange(4, dtype=DTYPE, device=DEVICE).unsqueeze(1) / 4
         target = torch.tensor(
             [[1.0, 10.0], [3.0, 20.0], [5.0, 30.0], [float("nan"), float("nan")]],
             dtype=DTYPE,
@@ -62,7 +62,6 @@ class TestRegressionHeadCoordinates:
         gamma[:, 0] = 1.0
         reg.update_centroids_(head, session)
         torch.testing.assert_close(head.C_y[:, 1], expected_weighted_mean)
-        torch.testing.assert_close(head.live_cache.weighted_target_mean, expected_weighted_mean)
 
     def test_centroids_update_before_learnable_output_weights(self) -> None:
         X_cont, target = noisy_regression_blobs()
@@ -104,3 +103,26 @@ class TestRegressionHeadCoordinates:
         torch.testing.assert_close(head.C_y, expected_centroids)
         torch.testing.assert_close(head.W_M, expected_weights)
         assert not torch.allclose(expected_weights, stale_weights)
+
+    def test_a_head_step_after_an_assignment_reads_the_new_affiliations(self) -> None:
+        X_cont, target = noisy_regression_blobs()
+        session = materialise(
+            regression_recipe(Input(K=2, epsilon=0.1), epsilon_M=0.2), X_cont, target, seed=4
+        )
+        head, source = session.graph.head, session.graph.input
+        supervision = session.data.supervision
+        assert isinstance(supervision, _RegressionSupervision)
+
+        def weighted_means(gamma: torch.Tensor) -> torch.Tensor:
+            weighted_gamma = supervision.row_weights[:, None] * gamma
+            return target.T @ weighted_gamma / weighted_gamma.sum(dim=0)
+
+        head.update_parameters_(session)  # counts the labels of these affiliations
+        stale = weighted_means(source.gamma)
+        source.update_parameters_(session)
+        expected = weighted_means(source.gamma)
+        assert not torch.allclose(expected, stale)
+
+        head.update_parameters_(session)
+
+        torch.testing.assert_close(head.C_y, expected)

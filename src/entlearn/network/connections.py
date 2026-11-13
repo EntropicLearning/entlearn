@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from entlearn.primitives.coupling import accumulate_coupling_, transition_partial_loss_
-from entlearn.primitives.normalise import floored_log_, normalise_
+from entlearn.primitives.normalise import _scratch_view, floored_log_, normalise_
 from entlearn.primitives.softmax import assign_simplex_
 from entlearn.primitives.transitions import update_theta_
 from entlearn.recipe import Connection, Coupling
@@ -36,7 +36,7 @@ class _ConnectionState:
         dtype: torch.dtype,
         device: torch.device,
     ) -> _ConnectionState:
-        """Allocate an uninitialised transition and its safe-log cache."""
+        """Allocate an uninitialised transition and its log cache."""
         theta = torch.empty(K_target, K_source, dtype=dtype, device=device)
         return cls(
             description=description,
@@ -50,6 +50,12 @@ class _ConnectionState:
         """Return the coupling the Recipe stores for this connection."""
         assert self.description.coupling is not None
         return self.description.coupling
+
+    @property
+    def delta(self) -> float:
+        """Return the coupling strength, which the built Recipe resolves from any ratio."""
+        assert self.description.delta is not None
+        return self.description.delta
 
     def prune_source_(self, keep: torch.Tensor, scratch: torch.Tensor) -> None:
         """Compact the source columns, renormalising only under S coupling."""
@@ -73,6 +79,13 @@ class _ConnectionState:
     def _norm_dim(self) -> int:
         """Return the stochastic axis selected by the connection coupling."""
         return 0 if self.coupling is Coupling.M else 1
+
+    def _weighting(self, session: _FitSession) -> tuple[float, torch.Tensor | None]:
+        """Return the coupling strength and row weights; a uniform weight scales the strength."""
+        weight = session.uniform_weight
+        if weight is None:
+            return self.delta, session.data.sample_weights
+        return self.delta * weight, None
 
     @property
     def pseudocount(self) -> float:
@@ -100,15 +113,18 @@ class _ConnectionState:
             if norm_dim == 0
             else session.workspace.scratch_K[: gamma_target.shape[1]]
         )
+        # A uniform weight c scales every count, so the counts of Γ with the prior over c
+        # normalise to the same transition.
+        weight = session.uniform_weight
         update_theta_(
             self.theta,
             self.log_theta,
             gamma_target,
             gamma_source,
             scratch,
-            sample_weights=session.data.sample_weights,
-            scratch_TK_source=session.workspace.matrix[:T, :K_source],
-            pseudocount=self.pseudocount,
+            sample_weights=session.data.sample_weights if weight is None else None,
+            scratch_TK_source=_scratch_view(session.workspace.matrix, K_source, T),
+            pseudocount=self.pseudocount if weight is None else self.pseudocount / weight,
             norm_dim=norm_dim,
         )
 
@@ -124,9 +140,8 @@ class _ConnectionState:
             cost,
             self.log_theta.transpose(0, 1),
             gamma_source,
-            self.description.delta,
-            session.data.sample_weights,
-            session.workspace.log_matrix[:, :K_source],
+            *self._weighting(session),
+            _scratch_view(session.workspace.log_matrix, K_source),
         )
 
     def accumulate_into_source_cost_(
@@ -141,9 +156,8 @@ class _ConnectionState:
             cost,
             self.log_theta,
             gamma_target,
-            self.description.delta,
-            session.data.sample_weights,
-            session.workspace.log_matrix[:, :K_target],
+            *self._weighting(session),
+            _scratch_view(session.workspace.log_matrix, K_target),
         )
 
     def partial_loss_(
@@ -159,22 +173,23 @@ class _ConnectionState:
         -delta Σ(counts / total + prior / total) log(theta).
         """
         T, K_source = gamma_source.shape
+        delta, weights = self._weighting(session)
         transition_partial_loss_(
             session.workspace.loss,
             self.log_theta,
             gamma_target,
             gamma_source,
-            self.description.delta,
-            session.workspace.matrix[:T, :K_source],
+            delta,
+            _scratch_view(session.workspace.matrix, K_source, T),
             session.workspace.scalar,
-            session.data.sample_weights,
+            weights,
         )
         pseudocount = self.pseudocount
         if pseudocount != 0.0:
             torch.sum(self.log_theta, dim=(0, 1), out=session.workspace.scalar)
             session.workspace.loss.add_(
                 session.workspace.scalar,
-                alpha=-self.description.delta * pseudocount,
+                alpha=-self.delta * pseudocount,
             )
 
     def propagate_(
@@ -190,7 +205,7 @@ class _ConnectionState:
             gamma_target,
             self.log_theta.transpose(0, 1),
             gamma_source,
-            self.description.delta,
+            self.delta,
         )
         assign_simplex_(
             gamma_target,

@@ -5,22 +5,24 @@ normalises the scores into the standard input's continuous-then-categorical
 feature order. The correlation method uses correlation ratio, Cramér's V or
 absolute Pearson correlation according to the feature modality and task. The
 mutual-information method delegates to scikit-learn's classification or
-regression estimator. Statistical calculations use float64; the requested
-tensor dtype is applied to the result. Degenerate scores fall back to uniform
-weights.
+regression estimator. An optional permutation null subtracts, per modality,
+a quantile of the scores the features receive once the target is shuffled.
+Statistical calculations use float64; the requested tensor dtype is applied to
+the result. Degenerate scores fall back to uniform weights.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from numbers import Integral, Real
 from typing import Literal
 
 import numpy as np
 import torch
 
 
-def _prepare_labelled_arrays(
+def _prepare_labelled_arrays(  # noqa: C901
     X_cont: object,
     categorical_codes: Sequence[object],
     target: object,
@@ -136,6 +138,24 @@ def _finalise_scores(scores: np.ndarray) -> np.ndarray:
     return scores / total
 
 
+def _subtract_null_threshold(
+    scores: np.ndarray,
+    null_scores: np.ndarray,
+    continuous_width: int,
+    null_quantile: float,
+) -> np.ndarray:
+    """Return scores minus their modality's pooled null quantile, clipped at zero.
+
+    Continuous and categorical features are scored by different statistics, so each
+    modality's threshold pools the permuted-target scores of its own features only.
+    """
+    thresholds = np.zeros_like(scores)
+    for block in (slice(None, continuous_width), slice(continuous_width, None)):
+        if null_scores[:, block].size:
+            thresholds[block] = np.quantile(null_scores[:, block], null_quantile)
+    return np.clip(scores - thresholds, 0.0, None)
+
+
 def _to_tensor(
     scores: np.ndarray,
     *,
@@ -236,6 +256,8 @@ def _feature_weight_scores(
     labelled_mask: object | None,
     output_weights: object | None,
     random_state: int | None,
+    null_permutations: int,
+    null_quantile: float,
 ) -> np.ndarray:
     """Return the float64 feature-weight simplex scored by ``method``."""
     X_labelled, codes_labelled, target_labelled = _prepare_labelled_arrays(
@@ -251,20 +273,30 @@ def _feature_weight_scores(
         else None
     )
     if X_labelled.shape[0] < 2:
-        scores = np.zeros(X_labelled.shape[1] + len(codes_labelled))
-    elif method == "correlation":
-        scores = _correlation_scores(
-            X_labelled, codes_labelled, target_labelled, task, resolved_output_weights
-        )
-    else:
-        scores = _mutual_info_scores(
+        return _finalise_scores(np.zeros(X_labelled.shape[1] + len(codes_labelled)))
+
+    def score(target_rows: np.ndarray) -> np.ndarray:
+        if method == "correlation":
+            return _correlation_scores(
+                X_labelled, codes_labelled, target_rows, task, resolved_output_weights
+            )
+        return _mutual_info_scores(
             X_labelled,
             codes_labelled,
-            target_labelled,
+            target_rows,
             task,
             resolved_output_weights,
             random_state,
         )
+
+    scores = score(target_labelled)
+    if null_permutations > 0:
+        # Permuting whole rows keeps a multi-output target's outputs together.
+        rng = np.random.default_rng(random_state)
+        null_scores = np.stack(
+            [score(rng.permutation(target_labelled)) for _ in range(null_permutations)]
+        )
+        scores = _subtract_null_threshold(scores, null_scores, X_labelled.shape[1], null_quantile)
     return _finalise_scores(scores)
 
 
@@ -277,6 +309,8 @@ def feature_weights(
     method: Literal["correlation", "mutual_info"],
     labelled_mask: object | None = None,
     output_weights: object | None = None,
+    null_permutations: int = 0,
+    null_quantile: float = 0.99,
     random_state: int | None = None,
     dtype: torch.dtype = torch.float64,
     device: torch.device | str | None = None,
@@ -286,8 +320,19 @@ def feature_weights(
     Continuous features precede categorical features in the returned tensor.
     ``"correlation"`` scores a feature by correlation ratio, Cramér's V or absolute
     Pearson correlation according to its modality and the task. ``"mutual_info"``
-    scores it with scikit-learn's mutual-information estimator. When fewer than two
-    rows are labelled or no score is positive, the weights are uniform.
+    scores it with scikit-learn's mutual-information estimator. The weights are the
+    scores divided by their sum. When fewer than two rows are labelled or no score is
+    positive, the weights are uniform.
+
+    Both statistics are biased, so an unrelated feature can still have non-zero
+    score. A positive ``null_permutations`` corrects for this. The labelled rows'
+    targets are shuffled that many times and every feature is scored against each
+    shuffle.  The ``null_quantile`` of that pool is subtracted from the modality's
+    scores.
+
+    Use the threshold when the features outnumber the labelled rows.
+    With few features relative to the labelled rows, the bias is small and
+    the threshold can remove weakly informative features, so it is off by default.
 
     Args:
         X_cont: Two-dimensional continuous input accepted by NumPy.
@@ -299,8 +344,13 @@ def feature_weights(
             ``"mutual_info"``.
         labelled_mask: Optional boolean array selecting labelled rows.
         output_weights: Optional regression-output weights used when averaging scores.
-        random_state: Seed passed to scikit-learn's mutual-information estimator.
-            It must be ``None`` for ``"correlation"``, which draws no random numbers.
+        null_permutations: Number of target permutations that estimate the scores of
+            features unrelated to the target. ``0`` leaves the scores unadjusted.
+        null_quantile: Quantile, in ``[0, 1]``, of the pooled null scores subtracted
+            from each score when ``null_permutations`` is positive.
+        random_state: Seed for the random numbers the call draws: the target
+            permutations and scikit-learn's mutual-information estimator. It must be
+            ``None`` for ``"correlation"`` without permutations, which draws none.
         dtype: Floating dtype of the returned tensor. Statistical calculations use
             float64 regardless of this output dtype.
         device: Device of the returned tensor.
@@ -309,14 +359,27 @@ def feature_weights(
         Detached, non-negative feature weights with unit total mass.
 
     Raises:
-        ValueError: If ``method`` is unknown, ``random_state`` accompanies
-            ``"correlation"``, the arrays are incompatible or the tensor placement
-            is unsupported.
+        ValueError: If ``method`` is unknown, ``null_permutations`` is not a
+            non-negative integer, ``null_quantile`` lies outside ``[0, 1]``,
+            ``random_state`` accompanies ``"correlation"`` without permutations, the
+            arrays are incompatible or the tensor placement is unsupported.
     """
     if method not in ("correlation", "mutual_info"):
         raise ValueError("method must be 'correlation' or 'mutual_info'")
-    if method == "correlation" and random_state is not None:
-        raise ValueError("random_state must be None for correlation")
+    if (
+        isinstance(null_permutations, bool)
+        or not isinstance(null_permutations, Integral)
+        or null_permutations < 0
+    ):
+        raise ValueError("null_permutations must be a non-negative integer")
+    if (
+        isinstance(null_quantile, bool)
+        or not isinstance(null_quantile, Real)
+        or not 0.0 <= null_quantile <= 1.0
+    ):
+        raise ValueError("null_quantile must be a number in [0, 1]")
+    if method == "correlation" and null_permutations == 0 and random_state is not None:
+        raise ValueError("random_state must be None for correlation without null permutations")
     scores = _feature_weight_scores(
         X_cont,
         categorical_codes,
@@ -326,5 +389,7 @@ def feature_weights(
         labelled_mask,
         output_weights,
         random_state,
+        int(null_permutations),
+        float(null_quantile),
     )
     return _to_tensor(scores, dtype=dtype, device=device)

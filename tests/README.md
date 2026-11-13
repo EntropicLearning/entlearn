@@ -7,10 +7,23 @@ reusable helpers at module level; put shared test data in the relevant `_fixture
 When regrouping tests, preserve their parameterisation, assertions and subprocess
 programs. Compare collection counts before and after, then run the affected tests.
 
-## On-demand checks in `scripts/`
+A refusal test's `match=` names the offending value and the shortest phrase of the reason.
+Ruff's `PT011` fails a broad `pytest.raises` without one, and `tests/conftest.py` fails a
+pattern that spells out a whole message.
 
-`scripts/` holds checks outside the ordinary `tests/` collection;
-[scripts/README.md](../scripts/README.md) lists them and when to run each.
+Pytest turns every warning into an error. A test whose subject is a warning asserts it with
+`pytest.warns(Category, match=...)`, under the same `match=` rule. A warning that a test's
+setup causes but does not test is filtered on that test: `FIXED_BUDGET` from `conftest.py`
+for a fit that runs a fixed number of iterations, `RANK_DEFICIENT` for a small manifold
+fixture, and otherwise `@pytest.mark.filterwarnings("ignore:<message start>:<Category>")`.
+`pyproject.toml` filters only third-party warnings that no call site can avoid.
+
+## Running the checks
+
+While working, run the test file you changed, then its directory. Before opening a pull
+request, run `scripts/gate` once: it runs Ruff, `ty`, the checks in `scripts/` and this suite.
+A change to numerical code also runs its directory with `EON_TEST_DTYPE=float32`.
+[scripts/README.md](../scripts/README.md) lists the `scripts/` checks and what each guards.
 
 ## Lanes and depth
 
@@ -23,8 +36,11 @@ Four environment variables, read once by `tests/conftest.py`, select what a run 
   replicates: one seed per seed axis at `minimal`, the counts CI runs at `standard`, and
   more seeds at `exhaustive`.
 - `EON_TEST_DETERMINISTIC`: `1` (or `true`, `yes`, `on`) runs the session with
-  `torch.use_deterministic_algorithms(True)`. The cuda lane always does, because CUDA's
-  atomic `index_add_` is not bitwise reproducible from run to run.
+  `torch.use_deterministic_algorithms(True)`. Without it every lane runs in PyTorch's default
+  mode, where a fit repeats bitwise from run to run on CUDA too, so the identity tests check
+  what users run. The flag adds two checks the default mode lacks: every new `torch.empty`
+  tensor is filled with NaN, so a read of uninitialised scratch shows, and an operation with
+  no deterministic implementation raises. Run the cuda lane with it once before a release.
 
 The header line `EON test backend: ...` reports the active lane and depth, and whether
 deterministic algorithms are enforced. A device, dtype or depth the run cannot honour aborts
@@ -78,3 +94,11 @@ dtype is explicitly pinned. Statistical estimation or deliberately approximate
 algorithms may need an error bound beyond floating-point round-off; distinguish
 and explain that bound. Do not loosen existing monotonicity or other scientific
 tolerances to make a failing test pass.
+
+References follow the package's three numerical roles: a temperature
+of zero is hard and any positive one soft, in every dtype; masses and probability logs use
+`finfo(dtype).tiny`; tolerances use `eps`. Entropy references use exact positive logarithms
+with `0 log 0 = 0`. A test of a regime or emptiness boundary places values on both sides of
+it, at zero or `tiny`, not at `eps`. For contributions below `eps`, use relative error or an
+absolute bound derived from the contribution's own scale, so an ordinary absolute tolerance
+cannot hide a regression to an `eps` floor.

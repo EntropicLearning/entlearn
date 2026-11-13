@@ -16,7 +16,7 @@ from network._fixtures import (
 )
 
 from entlearn import Coupling
-from entlearn.primitives.normalise import _eps
+from entlearn.primitives.normalise import _tiny
 
 
 class TestSConnectionCoordinates:
@@ -35,11 +35,9 @@ class TestSConnectionCoordinates:
 
         distances = (theta[:, None, :] - gamma_source[None, :, :]).abs().amax(dim=2)
 
-        torch.testing.assert_close(
-            distances.amin(dim=1),
-            torch.zeros(theta.shape[0], dtype=DTYPE, device=DEVICE),
-            atol=8 * _eps(DTYPE),
-            rtol=0.0,
+        # Without a prior the selected profiles are copied, so each matches a row exactly.
+        assert torch.equal(
+            distances.amin(dim=1), torch.zeros(theta.shape[0], dtype=DTYPE, device=DEVICE)
         )
 
     @pytest.mark.parametrize("weighted", [False, True])
@@ -68,7 +66,7 @@ class TestSConnectionCoordinates:
         prototypes = hidden_connection(unregularised).theta
         gamma_source = unregularised.graph.input.gamma
         cross_entropy = -(
-            gamma_source[:, None, :] * prototypes.clamp_min(_eps(DTYPE)).log()[None, :, :]
+            gamma_source[:, None, :] * prototypes.clamp_min(_tiny(DTYPE)).log()[None, :, :]
         ).sum(dim=2)
         labels = cross_entropy.argmin(dim=1)
         assigned_masses = torch.zeros(prototypes.shape[0], dtype=DTYPE, device=DEVICE)

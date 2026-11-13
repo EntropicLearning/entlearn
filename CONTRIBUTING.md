@@ -39,7 +39,7 @@ uv run poe docs-build
 ## Open a pull request
 
 Open it against `main` on the public repository, and fill in the pull request template. A
-marimo notebook under `examples/` that shows a new feature is welcome but not required, and
-the maintainers update the docstrings and doc-site pages when they merge a change.
+marimo notebook under `examples/` that shows a new feature is welcome but not required.
+Updating the docstrings and doc-site pages in the same change is welcome too.
 
 [AGENTS.md](AGENTS.md) explains how the codebase is built and why.

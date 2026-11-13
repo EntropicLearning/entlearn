@@ -46,10 +46,10 @@ With an array, columns are identified by their positions. With a named DataFrame
 ??? tip "What about lazy Polars DataFrames?"
     The estimators do not accept a Polars `LazyFrame`, and never run a lazy query for you: passing one raises a `TypeError`.
     To use them, call `collect()` first, which runs the query and loads its result into memory.
-    
+
     ```python
     import polars as pl
-    
+
     table = query.collect()
     X_polars = table.drop("label")
     y_polars = table["label"].to_numpy()
@@ -58,7 +58,7 @@ With an array, columns are identified by their positions. With a named DataFrame
     ).fit(X_polars, y_polars)
     polars_probabilities = polars_model.predict_proba(X_polars)
     ```
-    
+
     The values are encoded using the category vocabulary learned during fitting, not the category codes stored by Polars.
     For prediction, you can pass either a pandas or a Polars `DataFrame`, as long as the column names, their order and the category values match those used for fitting.
 
@@ -73,20 +73,21 @@ A categorical column with only one observed value is dropped with a warning, as 
 
 ??? warning "Feature scaling"
     The estimator converts and encodes the data, but does **not** automatically scale continuous features.
-    We recommend scaling continuous features, and regression targets, to [0, 1].
-    The model computes the squared distance between an observation $x_t$ and a centroid $c_k$ through the expansion $\Vert x_t-c_k\Vert^2=\Vert x_t\Vert^2-2x_t\cdot c_k+\Vert c_k\Vert^2$, which avoids forming every difference $x_t-c_k$. Regression targets are compared with the output centroids in the same way.
-    Its rounding error grows with the size of the values rather than with the distance, so with large feature values a small distance can be lost to cancellation. In [0, 1], the terms stay small, and so does the error.
-    The [categorical costs](../concepts/representation.md#the-discretisation-error) are also scaled to match that range, and the suggested [search ranges](model_selection.md#choosing-search-ranges) assume it.
+    Moreover, the model computes the squared distance between an observation $x_t$ and a centroid $c_k$ through the expansion $\Vert x_t-c_k\Vert^2=\Vert x_t\Vert^2-2x_t\cdot c_k+\Vert c_k\Vert^2$, which avoids forming every difference $x_t-c_k$. Regression targets are compared with the output centroids in the same way.
+    The rounding error of this expansion grows with the size of the values rather than with the distance, so with large feature values a small distance can be lost to cancellation.
+    We therefore recommend both scaling and centring continuous features, and regression targets, to have (approximately) unit range and be centred about 0, e.g. [-0.5, 0.5].
+    The suggested [search ranges](model_selection.md#choosing-search-ranges) assume the features to be scaled in this way.
 
+    The [categorical costs](../concepts/representation.md#the-discretisation-error) are scaled to match unit-range continuous features.
     Fit any preprocessing on the training rows only, and apply the same transformation to evaluation data and new observations.
 
 ### Sample and class weights
 
-Sample weights are positive weights representing the relative contribution of each data point. 
-They can be provided by passing `sample_weight` to `fit`. 
+Sample weights are positive weights representing the relative contribution of each data point.
+They can be provided by passing `sample_weight` to `fit`.
 
-!!! warning "sample weights are not related to the instance weights"
-    Instance weights are **learned** by the model during the optimization process, whereas sample weights are provided by you and fixed. Both can be used in conjunction. Your provided sample weights will affect the coupling terms, affiliation entropy and output term, see [Weights](../concepts/learning.md#instance-weights) and [Loss](../concepts/loss.md).
+!!! warning "Sample weights are not equivalent to instance weights"
+    Instance weights are **learned** by the model during the optimisation process, whereas sample weights are provided by you and fixed. Both can be used in conjunction. Your provided sample weights will affect the coupling terms, affiliation entropy and output term, and the instance weights are learned relative to these provided weights, see [Weights](../concepts/learning.md#instance-weights) and [Loss](../concepts/loss.md).
 
 For classification, `class_weights` specifies the relative weight of each class in the output term.
 Class weights can be provided as a dictionary (including every possible class) or as a vector (in sorted class order).
@@ -122,7 +123,7 @@ Here, `predict` estimates the target, while `reconstruct` approximates the input
 
 `reconstruct` returns a `TabularReconstruction`: `continuous` contains reconstructed continuous values, and `categorical` contains probability matrices.
 Use `continuous_indices`, `categorical_indices` and `categories` to recover their original column positions and category meanings. Dropped constant categories return one-column distributions of ones.
-These distributions express a mixture of centroids, not calibrated category predictions or missing-data imputations.
+These distributions express a mixture of centroids rather than missing-data imputations.
 
 For target-dependent row weights, `regression_weighting` accepts a callable receiving the labelled target tensor and returning one finite, strictly positive tensor weight per labelled row. This is separate from `sample_weight` and from [output-dimension weighting](hyperparameters.md#regression-output-weights).
 
@@ -141,21 +142,19 @@ If `y` is a vector with shape `(n_samples,)`, predictions have shape `(n_queries
 If `y` is a matrix with shape `(n_samples, n_targets)`, predictions have shape `(n_queries, n_targets)`, also when there is only one target column.
 
 What does `score` measure?
-For a **classifier**, it returns accuracy; for a **regressor**, it returns the coefficient of determination, $R^2$.
-These measure predictive performance and are different from the training objective, which is recorded in `loss_curve_`.
-Use evaluation data to assess how well the model generalises.
+By default, accuracy for a classifier and the coefficient of determination $R^2$ for regression.
 
 !!! note "Unlabelled observations"
     During fitting, a numeric value of `-1` marks an **unlabelled** classification row, which can still be used for training without contributing to the output term.
     For regression, a row whose targets are all `NaN` is treated as unlabelled. Partially missing multi-target rows are rejected by the estimator.
-    When calling `score`, make sure to pass only fully labelled evaluation rows as they are not filtered automatically.
+    When calling `score`, make sure to pass only fully labelled evaluation rows as they are _not_ filtered automatically.
 
 After fitting, the estimator exposes several useful attributes:
 
 | Attribute | Contains |
 | --- | --- |
 | `network_` | The fitted `Network` |
-| `loss_curve_` | The initial training loss and the loss after each completed iteration |
+| `loss_curve_` | The loss after each iteration |
 | `n_iter_` | The number of completed training iterations |
 | `feature_layout_` | The continuous, categorical and dropped column positions, and the learned category vocabularies |
 
@@ -167,11 +166,8 @@ print(model.n_iter_)
 print(model.loss_curve_)
 ```
 
-Using the estimator's `predict` and `predict_proba` methods for tabular data automatically applies its column and label mappings.
-They then predict with the fitted prediction policy: by default a single forward pass and, for classification, the geometric read-out; see [Hyperparameters](hyperparameters.md#fitting-and-prediction-controls).
-
-The fitted attributes are set only once a fit has succeeded.
-If `fit` raises, including when a warning is turned into an error, the estimator keeps its previous fit, or stays unfitted.
+Using the estimator's `predict` and `predict_proba` methods automatically applies its column and label mappings.
+They then predict with the fitted prediction policy: by default a single forward pass and, for classification, the geometric read-out, see [Hyperparameters](hyperparameters.md#fitting-and-prediction-controls).
 
 ## Inlier percentiles and feature reports
 
@@ -186,8 +182,8 @@ query_weights = support_model.recover_instance_weights(X_eval)
 support_scores = support_model.score_samples(X_eval)
 ```
 
-Weights are the outlier measures, whereas the inlier scores are the same values, ranked against the fitted reference (i.e., the measures obtained on the training data). 
-They describe [how well a query fits the learned input representation](networks.md#reconstruction-and-inlier-percentiles), and are not automatically comparable across refits.
+`recover_instance_weights` returns the recovered instance weights, and `score_samples` returns the inlier percentiles: the same weights, ranked against the fitted reference (the weights recovered on the training data).
+They describe [how well a query fits the learned input representation](networks.md#reconstruction-and-inlier-percentiles), and are not necessarily comparable across refits.
 
 For standard inputs, `model.feature_importances_` returns fitted feature weights in original column order, with zeros for dropped columns.
 With non-uniform weights, `model.active_features(tol=1.0)` selects original column indices whose weights exceed the uniform share. For manifolds, importance instead measures [tangent participation](manifold.md#select-dimension-and-interpret-limitations).
@@ -197,15 +193,16 @@ dimensions = model.effective_dimensions(normalise=False)
 parameter_count = model.count_parameters()
 ```
 
-Effective dimensions reflects how concentrated the fitted distributions are.
-Parameter counting uses active fitted dimensions, excludes fixed weights (for instance, if feature weights are not learned, they are not counted as active parameters) and accounts for constraints by default.
-Training affiliations can be included in the parameter count by using `include_affiliations=True`, provided the training state was retained.
+Effective dimensions reflect how concentrated the fitted distributions are.
+Parameter counting uses active fitted dimensions, excludes fixed weights (as they are not learned, they are not counted as active parameters) and accounts for constraints by default.
+Training affiliations can be included in the parameter count by using `include_affiliations=True`, if the training state was retained.
 For tensor models, the corresponding functions are in [reporting helpers](../reference/helpers.md#fitted-reporting) and accept a `Network`.
 
 ## Saving an estimator
 
-Saving an estimator must preserve its class labels, column layout and categorical encodings alongside the fitted `Network`.
-Use `joblib` to save the complete estimator. The `.safetensors` format described in [Using Networks](networks.md#save-the-network) saves the underlying `Network`:
+Saving an estimator involves more than saving its internal `Network`.
+The original class labels, column layout and categorical encodings must also be stored for the model to be reused. The estimators do not have their own `save` and `load` methods.
+The `.safetensors` format described in [Using Networks](networks.md#save-the-network) saves a `Network`, whereas saving estimators can be done via `joblib`:
 
 ```python
 import joblib
@@ -243,7 +240,7 @@ model.fit(X, y)
 Supply the same training rows, in the same order, with the same targets and any weights used originally.
 The model must retain its training state, and its recipe must be unchanged.
 Here, `max_iter` is the maximum **total** number of iterations, which includes those already completed.
-An already-converged model may need a tighter `tol` to continue, even with a larger iteration limit.
+Increasing this limit does not make an already-converged model continue, a tighter `tol` may be needed.
 
 To fit on new observations while keeping the learned parameters as the starting point, use `"fine_tune"`:
 
@@ -259,7 +256,7 @@ Fine-tuning starts a new loss history and iteration count.
 The feature layout, class labels and category vocabularies must remain compatible with the existing model.
 You can change compatible objective settings, such as temperatures, but not the model structure or cluster counts.
 Both continuation modes require `n_inits=1` and update the estimator's fitted attributes after a successful fit.
-An incompatible continuation raises, rather than silently starting a fresh fit.
+An incompatible continuation raises an error.
 
 If the original fit retained several members, each continues independently and the original winner remains selected.
 

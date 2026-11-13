@@ -18,14 +18,14 @@ from entlearn.network.config import PredictConfig
 from entlearn.network.fit import LossIncreaseWarning, _converged, loss_noise_threshold
 from entlearn.network.session import _CompiledGraph
 from entlearn.primitives.coupling import accumulate_coupling_, transition_partial_loss_
-from entlearn.primitives.normalise import _is_soft
+from entlearn.primitives.normalise import _is_soft, _scratch_view
 from entlearn.primitives.output import (
     classification_output_accumulate_into_source_cost_,
     classification_output_loss_,
     regression_output_accumulate_into_source_cost_,
     regression_output_loss_,
 )
-from entlearn.primitives.softmax import argmin_assign_, softmax_with_temp_
+from entlearn.primitives.softmax import argmin_assign_, weighted_assign_simplex_
 from entlearn.primitives.statistics import entropy_penalty_
 
 if TYPE_CHECKING:
@@ -43,11 +43,11 @@ class _Refinement:
     weights: torch.Tensor | None  # (T,) recovered ratios; None when recovery is unavailable
     input_scale: torch.Tensor  # (T,) T_train * weights / T; without recovery, row_weights itself
     row_weights: torch.Tensor  # (T,) uniform 1/T for coupling and head terms, not recovered
-    labelled: torch.Tensor  # (T,) all true: every query has a latent output coordinate
     target_sq: torch.Tensor | None  # (T, M) squared regression coordinates, refreshed each update
-    target_norm: torch.Tensor | None  # (T,) squared target norm, weighted by fitted W_M if present
+    target_moment: torch.Tensor | None  # (M,) Σ_t row_weights[t]·target_sq[t, m]
     scratch_KM: torch.Tensor | None  # (K_source, M) residual scratch, disjoint from costs
     epsilon_P: float  # output temperature; arithmetic policies use the head's delta
+    offset: float = 0.0  # offset of the last loss
 
     @classmethod
     def allocate(
@@ -72,13 +72,12 @@ class _Refinement:
             weights,
             row_weights if weights is None else weights * (graph.training_rows / T),
             row_weights,
-            torch.ones(T, dtype=torch.bool, device=device),
             torch.empty_like(prediction) if regression else None,
-            torch.empty(T, dtype=dtype, device=device) if regression else None,
+            torch.empty(M, dtype=dtype, device=device) if regression else None,
             torch.empty(gammas[graph.terminal.source].shape[1], M, dtype=dtype, device=device)
             if regression
             else None,
-            graph.terminal.delta if config.epsilon_P is None else config.epsilon_P,
+            graph.head_delta if config.epsilon_P is None else config.epsilon_P,
         )
 
     def refresh_target_(self) -> None:
@@ -86,12 +85,9 @@ class _Refinement:
         head = self.graph.head
         if not isinstance(head, _RegressionBlock):
             return
-        assert self.target_sq is not None and self.target_norm is not None
+        assert self.target_sq is not None and self.target_moment is not None
         torch.mul(self.prediction, self.prediction, out=self.target_sq)
-        if head.W_M is None:
-            torch.sum(self.target_sq, dim=1, out=self.target_norm)
-        else:
-            torch.mv(self.target_sq, head.W_M, out=self.target_norm)
+        torch.mv(self.target_sq.transpose(0, 1), self.row_weights, out=self.target_moment)
 
     def prediction_step_(self) -> None:
         """Minimise the head term over the latent prediction coordinate."""
@@ -101,12 +97,12 @@ class _Refinement:
             head.geometric_readout_(
                 self.prediction,
                 gamma,
-                self.graph.terminal.delta,
+                self.graph.head_delta,
                 self.epsilon_P,
                 self.query.workspace,
             )
         else:
-            head.readout_(self.prediction, gamma, self.graph.terminal.delta, self.query.workspace)
+            head.readout_(self.prediction, gamma, self.graph.head_delta, self.query.workspace)
         self.refresh_target_()
 
     def outgoing_cost_(self, name: str, cost: torch.Tensor) -> None:
@@ -120,31 +116,27 @@ class _Refinement:
                     cost,
                     target.incoming[connection.name].log_theta,
                     self.gammas[connection.target],
-                    connection.delta / T,
+                    target.incoming[connection.name].delta / T,
                 )
             elif isinstance(target, _ClassificationBlock):
                 classification_output_accumulate_into_source_cost_(
                     cost,
                     target.log_theta,
                     self.prediction,
-                    connection.delta,
+                    self.graph.head_delta,
                     self.row_weights,
-                    self.labelled,
-                    ws.log_matrix[:, : target.output_width],
+                    _scratch_view(ws.log_matrix, target.output_width),
                 )
             else:
                 assert isinstance(target, _RegressionBlock)
-                assert self.target_norm is not None and self.scratch_KM is not None
+                assert self.scratch_KM is not None
                 K = cost.shape[1]
                 regression_output_accumulate_into_source_cost_(
                     cost,
                     target.C_y,
                     self.prediction,
-                    self.target_norm,
-                    target.effective_delta(connection.delta),
-                    self.row_weights,
-                    self.labelled,
-                    ws.log_matrix[:, :K],
+                    target.effective_delta(self.graph.head_delta) / T,  # query row weights: 1 / T
+                    None,
                     ws.scratch_K[:K],
                     self.scratch_KM,
                     Wm=target.W_M,
@@ -155,7 +147,7 @@ class _Refinement:
         graph, ws = self.graph, self.query.workspace
         gamma = self.gammas[name]
         T, K = gamma.shape
-        cost = ws.matrix[:T, :K]
+        cost = _scratch_view(ws.matrix, K, T)
         block = graph.blocks[name]
         assert isinstance(block, _ClusteringBlock)
         if isinstance(block, _HiddenBlock):
@@ -165,18 +157,23 @@ class _Refinement:
                     cost,
                     block.incoming[connection.name].log_theta.transpose(0, 1),
                     self.gammas[connection.source],
-                    connection.delta / T,
+                    block.incoming[connection.name].delta / T,
                 )
         else:
             # Recovered weights scaled by T_train/T_query, or uniform 1/T without recovery.
             torch.mul(self.query.total, self.input_scale.unsqueeze(1), out=cost)
         self.outgoing_cost_(name, cost)
-        # A large query batch can move epsilon / T below machine precision.
-        # The fitted regime is referenced to avoid inadvertant regime change.
         if block.soft_assignments:
-            softmax_with_temp_(gamma, cost, block.description.epsilon / T, 1, ws.row_keepdim)
+            weighted_assign_simplex_(
+                gamma,
+                cost,
+                block.effective_epsilon,
+                1.0 / T,
+                ws.row_keepdim,
+                ws.row_indices,
+            )
         else:
-            argmin_assign_(gamma, cost, 1, ws.row_indices)
+            argmin_assign_(gamma, cost, 1, ws.row_keepdim, ws.row_indices)
 
     def input_step_(self) -> None:
         """Update input affiliations, then recover weights from both modalities."""
@@ -199,13 +196,13 @@ class _Refinement:
         bₜ = Σₖ Γ⁰ₜₖ dₜₖ the input discretisation cost. With recovery active::
 
             L = a Σₜ [wₜ bₜ + ε_T wₜ(log wₜ + log Z_train - 1)]
-                + (1/T) Σₙ ε̃ₙ Σₜₖ Γⁿₜₖ log Γⁿₜₖ
+                + (1/T) Σₙ εₙ Σₜₖ Γⁿₜₖ log Γⁿₜₖ
                 - (1/T) Σₑ δₑ Σₜ Γ_target,tᵀ log Θₑ Γ_source,t
                 + L_head
 
-        The connection sum excludes the head. ε̃ₙ is the raw affiliation εₙ
-        for a fitted soft regime and zero for a hard regime. Without instance-weight recovery,
-        the first term becomes (1/T) Σₜ bₜ and there is no weight entropy.
+        The connection sum excludes the head, and a hard block has εₙ = 0. Without
+        instance-weight recovery, the first term becomes (1/T) Σₜ bₜ and there is no weight
+        entropy.
 
         For classification with latent class distribution pₜ::
 
@@ -222,13 +219,15 @@ class _Refinement:
 
         Each recovered wₜ is constrained independently to [0, 1], not to
         a simplex. Its partial loss term has stationary point
-        exp(-bₜ/ε_T - log Z_train), clipped at one.
+        exp(-bₜ/ε_T - log Z_train), clipped at one. ε_T log Z_train is taken from its two
+        finite parts, ε_T·log_partition - partition_shift.
         """
         graph, ws = self.graph, self.query.workspace
         T, M = self.prediction.shape
         ws.loss.zero_()
         torch.dot(self.input_scale, self.query.instance_cost, out=ws.scalar)
         ws.loss.add_(ws.scalar)
+        self.offset = 0.0
         for name in graph.order[:-1]:
             block = graph.blocks[name]
             assert isinstance(block, _ClusteringBlock)
@@ -237,15 +236,21 @@ class _Refinement:
                 entropy_penalty_(
                     ws.loss,
                     gamma,
-                    block.description.epsilon / T,
-                    ws.log_matrix[:, : gamma.shape[1]],
+                    block.effective_epsilon / T,
+                    _scratch_view(ws.log_matrix, gamma.shape[1]),
                     ws.scalar,
                 )
+                self.offset += block.effective_epsilon * math.log(gamma.shape[1])
         if self.weights is not None:
-            scale = graph.training_rows / T * graph.input.description.epsilon_T
-            entropy_penalty_(ws.loss, self.weights, scale, ws.scratch_T, ws.scalar)
+            epsilon_T = graph.input.description.epsilon_T
+            scale = graph.training_rows / T
+            entropy_penalty_(ws.loss, self.weights, scale * epsilon_T, ws.scratch_T, ws.scalar)
             torch.sum(self.weights, dim=0, out=ws.scalar)
-            ws.loss.add_(ws.scalar, alpha=scale * (float(graph.input.log_partition) - 1))
+            # ε_T log Z_train from its finite parts, so a tiny ε_T cannot overflow it
+            scaled_log_partition = epsilon_T * float(graph.input.log_partition) - float(
+                graph.input.partition_shift
+            )
+            ws.loss.add_(ws.scalar, alpha=scale * (scaled_log_partition - epsilon_T))
         head = graph.head
         gamma = self.gammas[graph.terminal.source]
         K = gamma.shape[1]
@@ -255,33 +260,32 @@ class _Refinement:
                 head.log_theta,
                 self.prediction,
                 gamma,
-                graph.terminal.delta,
+                graph.head_delta,
                 self.row_weights,
-                self.labelled,
-                ws.log_matrix[:, :M],
-                ws.matrix[:T, :K],
+                _scratch_view(ws.log_matrix, M),
+                _scratch_view(ws.matrix, K, T),
                 ws.scalar,
             )
-            if _is_soft(self.epsilon_P, self.prediction.dtype):
+            if _is_soft(self.epsilon_P):
                 entropy_penalty_(
                     ws.loss,
                     self.prediction,
                     self.epsilon_P / T,
-                    ws.log_matrix[:, :M],
+                    _scratch_view(ws.log_matrix, M),
                     ws.scalar,
                 )
+                self.offset += self.epsilon_P * math.log(M)
         else:
-            assert self.target_norm is not None and self.scratch_KM is not None
+            assert self.target_moment is not None and self.scratch_KM is not None
             regression_output_loss_(
                 ws.loss,
                 head.C_y,
                 self.prediction,
-                self.target_norm,
+                self.target_moment,
                 gamma,
-                head.effective_delta(graph.terminal.delta),
+                head.effective_delta(graph.head_delta),
                 self.row_weights,
-                self.labelled,
-                ws.matrix[:T, :K],
+                _scratch_view(ws.matrix, K, T),
                 ws.scratch_K[:K],
                 self.scratch_KM,
                 ws.scalar,
@@ -296,8 +300,8 @@ class _Refinement:
                     target.incoming[connection.name].log_theta,
                     self.gammas[connection.target],
                     source,
-                    connection.delta / T,
-                    ws.matrix[:T, : source.shape[1]],
+                    target.incoming[connection.name].delta / T,
+                    _scratch_view(ws.matrix, source.shape[1], T),
                     ws.scalar,
                 )
         result = float(ws.loss)
@@ -336,7 +340,7 @@ def refine_prediction_(
                     f"prediction loss increased at iteration {iteration + 1} by {rise:.6g}",
                     LossIncreaseWarning,
                 )
-        if _converged(history, config.tol, prediction.dtype):
+        if _converged(history, config.tol, prediction.dtype, state.offset):
             converged = True
             break
     return tuple(history), converged

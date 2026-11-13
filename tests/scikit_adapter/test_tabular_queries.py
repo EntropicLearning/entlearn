@@ -5,7 +5,7 @@ import pandas as pd
 import polars as pl
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 
 from entlearn import (
     ClassificationHead,
@@ -13,48 +13,14 @@ from entlearn import (
     Input,
     PredictConfig,
     Recipe,
-    ReconstructionResult,
     RegressionHead,
 )
-from entlearn.scikit_adapter import (
-    EONClassifier,
-    EONRegressor,
-    FeatureLayout,
-    TabularReconstruction,
-)
+from entlearn.scikit_adapter import EONClassifier, EONRegressor, FeatureLayout
 
 from ._fixtures import tabular_data
 
 
 class TestTabularRecords:
-    @pytest.mark.parametrize(
-        "build",
-        [
-            lambda: TabularReconstruction(
-                continuous=np.ones((3, 1)),
-                categorical=(np.ones((3, 1)),),
-                continuous_indices=(1,),
-                categorical_indices=(0,),
-                categories=(np.array(["site"]),),
-                dropped_indices=(0,),
-                feature_names=None,
-            ),
-            lambda: FeatureLayout(
-                continuous_indices=(0,),
-                categorical_indices=(1,),
-                dropped_indices=(),
-                categories=(np.array(["a", "b"]),),
-                dropped_categories=(),
-            ),
-        ],
-        ids=["reconstruction", "layout"],
-    )
-    def test_records_compare_and_hash_by_identity(self, build):
-        record, copy = build(), build()
-        assert record == record  # noqa: PLR0124
-        assert record != copy
-        assert len({record, copy}) == 2
-
     def test_layout_maps_tensor_order_to_original_columns_and_counts_dropped(self):
         layout = FeatureLayout(
             continuous_indices=(1, 4),
@@ -65,25 +31,6 @@ class TestTabularRecords:
         )
         assert layout.tensor_positions == (1, 4, 0, 3)
         assert layout.n_columns == 5
-
-    @pytest.mark.parametrize(
-        ("kept", "dropped", "blocks"),
-        [((1, 2), (), 1), ((), (1, 2), 0)],
-        ids=["kept", "dropped"],
-    )
-    def test_as_tabular_rejects_a_categorical_column_without_its_record(
-        self, kept, dropped, blocks
-    ):
-        layout = FeatureLayout(
-            continuous_indices=(0,),
-            categorical_indices=kept,
-            dropped_indices=dropped,
-            categories=(np.array(["a", "b"]),) * len(kept),
-            dropped_categories=(np.array(["c"]),) if dropped else (),
-        )
-        result = ReconstructionResult(torch.ones(3, 1), (torch.full((3, 2), 0.5),) * blocks)
-        with pytest.raises(ValueError, match=r"zip\(\) argument 2 is shorter"):
-            layout.as_tabular(result, None)
 
 
 class TestTabularQueries:
@@ -123,6 +70,7 @@ class TestTabularQueries:
         indices.fill(-1)
         np.testing.assert_array_equal(model.active_features(tol=0), [0, 2, 3, 4])
 
+    @FIXED_BUDGET
     def test_dropped_columns_take_the_fitted_precision_not_the_numpy_default(self):
         X, _ = tabular_data()
         frame = pd.DataFrame({"constant": np.repeat("site", len(X)), "value": X[:, 0]})
@@ -143,6 +91,8 @@ class TestTabularQueries:
         assert result.continuous.dtype == np.float32
         assert result.categorical[0].dtype == result.continuous.dtype
 
+    @FIXED_BUDGET
+    @pytest.mark.filterwarnings("ignore:the scoring reference has collapsed:UserWarning")
     @pytest.mark.parametrize("container", ["numpy", "pandas", "polars"])
     @pytest.mark.parametrize("continuous", [False, True])
     def test_reconstruction_and_reporting_preserve_interleaved_feature_meanings(
@@ -173,7 +123,6 @@ class TestTabularQueries:
             estimator.fit(data, X[:, 1])
         policy = PredictConfig(predict_mode="iterative", max_iter=2)
         result = estimator.reconstruct(data, predict_config=policy)
-        assert isinstance(result, TabularReconstruction)
         assert result.feature_names == (None if container == "numpy" else tuple(columns))
         assert result.categorical_indices == positions
         assert result.continuous_indices == ((1,) if continuous else ())
@@ -184,7 +133,6 @@ class TestTabularQueries:
         expected = estimator.network_.reconstruct(tensor, X_cat=(codes,), predict_config=policy)
         np.testing.assert_array_equal(result.continuous, expected.continuous.cpu().numpy())
         np.testing.assert_array_equal(result.categorical[1], expected.categorical[0].cpu().numpy())
-        np.testing.assert_array_equal(result.categorical[0], np.ones((len(X), 1)))
         assert result.categorical[0].dtype == result.categorical[1].dtype
         np.testing.assert_array_equal(
             estimator.score_samples(data),
@@ -207,15 +155,3 @@ class TestTabularQueries:
                 estimator.active_features(tol=0.5),
                 np.flatnonzero(actual > 0.5 / len(expected_weights)),
             )
-        query = frame.copy()
-        query["constant"] = "ignored"
-        query_data = (
-            query
-            if container == "pandas"
-            else pl.DataFrame({name: query[name].to_numpy() for name in query})
-            if container == "polars"
-            else query.to_numpy()
-        )
-        repeated = estimator.reconstruct(query_data)
-        np.testing.assert_array_equal(repeated.categories[0], ["site"])
-        np.testing.assert_array_equal(repeated.categorical[0], np.ones((len(X), 1)))

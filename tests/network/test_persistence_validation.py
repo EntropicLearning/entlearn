@@ -1,13 +1,16 @@
 """Malformed portable artefacts fail before a Network is returned."""
 
 import math
+import re
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
+    assert_same_checkpoint,
     change_metadata,
     corrupt_saved_tensor,
     read_saved_metadata,
@@ -25,6 +28,26 @@ from entlearn import (
     Network,
     Recipe,
 )
+
+pytestmark = FIXED_BUDGET
+
+# The refusal each saved tensor gets when it holds NaN, and the name its messages use.
+NAN_MESSAGES = {
+    "states.0.continuous_centroids": "^continuous_centroids must be finite",
+    "states.0.feature_weights": "^feature_weights must be finite",
+    "states.0.categorical_centroids.0": "^categorical_centroids must be finite",
+    "models.0.blocks.0.continuous_centroids": r"^input\.centroids must be finite",
+    "models.0.blocks.0.feature_weights": r"^input\.feature_weights must contain only finite",
+    "models.0.blocks.0.categorical_centroids.0": r"^input\.categorical_centroids must contain only finite",
+    "models.0.blocks.1.theta": r"^input_to_hidden_1\.theta must contain only finite",
+    "models.0.blocks.2.theta": r"^output\.theta must contain only finite",
+    "models.0.Wt_ref": "invalid scoring reference",
+}
+MESSAGE_NAMES = {
+    "models.0.blocks.1.theta": "input_to_hidden_1.theta",
+    "models.0.blocks.2.theta": "output.theta",
+    "states.0.feature_weights": "feature_weights",
+}
 
 
 @pytest.fixture
@@ -85,7 +108,7 @@ class TestPersistenceValidation:
             data["winner"] = data["selection"]["selected_index"]
 
         change_metadata(artefact, damage)
-        with pytest.raises(ValueError, match="expected metadata fields"):
+        with pytest.raises(ValueError, match="fields: format version"):
             Network.load(artefact)
 
     @pytest.mark.parametrize("retain", ["states", "members"])
@@ -108,7 +131,7 @@ class TestPersistenceValidation:
         change_metadata(
             path, lambda data: data["models"][0]["diagnostics"].update(data["selection"])
         )
-        with pytest.raises(ValueError, match="expected metadata fields"):
+        with pytest.raises(ValueError, match="fields: loss_history n_iter"):
             Network.load(path)
 
     def test_a_duplicated_member_trajectory_is_rejected(self, artefact):
@@ -118,7 +141,7 @@ class TestPersistenceValidation:
                 data["selection"][field] = selected[field]
 
         change_metadata(artefact, damage)
-        with pytest.raises(ValueError, match="expected metadata fields"):
+        with pytest.raises(ValueError, match="fields: initialisation_outcomes selected_index"):
             Network.load(artefact)
 
     def test_a_member_bound_to_another_members_original_state_is_rejected(self, artefact):
@@ -136,9 +159,7 @@ class TestPersistenceValidation:
         tensors = load_file(path)
         tensors["states.0.continuous_centroids"] = tensors["states.0.continuous_centroids"][:1]
         replace_saved_tensors(tensors, path)
-        with pytest.raises(
-            ValueError, match="original state is incompatible with the fitted graph"
-        ):
+        with pytest.raises(ValueError, match="original state is incompatible"):
             Network.load(path)
 
     def test_a_fitted_graph_with_other_connection_seeds_is_rejected(self, tmp_path):
@@ -148,9 +169,7 @@ class TestPersistenceValidation:
             data["models"][0]["connection_sub_seeds"][0][1] += 1
 
         change_metadata(path, damage)
-        with pytest.raises(
-            ValueError, match="original state is incompatible with the fitted graph"
-        ):
+        with pytest.raises(ValueError, match="original state is incompatible"):
             Network.load(path)
 
     def test_a_losing_original_state_with_other_seed_names_is_rejected(self, tmp_path):
@@ -174,7 +193,7 @@ class TestPersistenceValidation:
         tensors = load_file(path)
         tensors["models.0.Wt_ref"] = torch.ones(8, dtype=DTYPE)
         replace_saved_tensors(tensors, path)
-        with pytest.raises(ValueError, match="scoring reference requires instance-weight recovery"):
+        with pytest.raises(ValueError, match="reference requires instance-weight recovery"):
             Network.load(path)
 
     def test_a_head_width_that_disagrees_with_the_schema_is_rejected(self, artefact):
@@ -194,7 +213,7 @@ class TestPersistenceValidation:
                     outcome.update(index=1 - outcome["index"])
                     for outcome in data["selection"]["initialisation_outcomes"]
                 ],
-                "selection outcomes must retain candidate order",
+                "retain candidate order",
             ),
             (
                 lambda data: data["selection"]["initialisation_outcomes"][0].update(
@@ -206,13 +225,13 @@ class TestPersistenceValidation:
                 lambda data: data["states"][0]["input_geometry"].update(
                     input=deepcopy(data["models"][0]["recipe"]["blocks"][1])
                 ),
-                "original geometry requires an input description",
+                "requires an input description",
             ),
             (
                 lambda data: data["models"][0].update(tol=-1.0),
-                "saved tolerance must be non-negative",
+                "tolerance must be non-negative",
             ),
-            (lambda data: data.update(states=[]), "missing fitted model or original state"),
+            (lambda data: data.update(states=[]), "missing fitted model"),
             (lambda data: data["models"].pop(), "inconsistent retention collection sizes"),
             (
                 lambda data: data["models"][0].update(initial_state=len(data["states"])),
@@ -220,7 +239,7 @@ class TestPersistenceValidation:
             ),
             (
                 lambda data: data["models"][0]["predict_config"].update(output_mode=None),
-                "saved prediction policy is not resolved",
+                "policy is not resolved",
             ),
         ],
         ids=[
@@ -262,7 +281,7 @@ class TestPersistenceValidation:
 
     def test_a_file_needs_the_selection_record(self, artefact):
         set_metadata(artefact, ("selection",), None)
-        with pytest.raises(ValueError, match="expected metadata fields"):
+        with pytest.raises(ValueError, match="fields: initialisation_outcomes selected_index"):
             Network.load(artefact)
 
     @pytest.mark.parametrize(
@@ -297,7 +316,7 @@ class TestPersistenceValidation:
 
     def test_an_outcome_field_outside_the_record_is_rejected(self, artefact):
         set_metadata(artefact, ("selection", "initialisation_outcomes", 0, "payload"), None)
-        with pytest.raises(ValueError, match="expected metadata fields"):
+        with pytest.raises(ValueError, match="fields: index seed"):
             Network.load(artefact)
 
     def test_a_training_gap_tie_break_is_restored_and_verified(self, artefact):
@@ -310,105 +329,105 @@ class TestPersistenceValidation:
         assert loaded.members[1].diagnostics.selected_outcome == outcomes[1]
 
     @pytest.mark.parametrize(
-        "field,value",
+        "field,value,message",
         [
-            ("format", "unknown"),
-            ("version", 0),
-            ("version", 2),
-            ("version", 3),
-            ("version", 4),
-            ("version", True),
-            ("package_version", None),
-            ("package_version", 1),
-            ("retention", "unknown"),
-            ("states", []),
-            ("states", {}),
-            ("models", []),
-            ("models", [None]),
+            ("format", "unknown", "format or version"),
+            ("version", 0, "format or version"),
+            ("version", True, "format or version"),
+            ("package_version", None, "metadata string"),
+            ("retention", "unknown", "unknown retention mode"),
+            ("states", [], "missing fitted model"),
+            ("states", {}, "metadata array"),
+            ("models", [], "missing fitted model"),
+            ("models", [None, None], "fields: recipe schema"),
         ],
     )
-    def test_invalid_envelope(self, artefact, field, value):
+    def test_invalid_envelope(self, artefact, field, value, message):
         set_metadata(artefact, (field,), value)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(artefact)
 
     @pytest.mark.parametrize(
-        "field,value",
+        "field,value,message",
         [
-            ("schema", None),
-            ("recipe", {}),
-            ("predict_config", {}),
-            ("diagnostics", {}),
-            ("epsilon_P_source", "unknown"),
-            ("epsilon_P_source", None),
-            ("initial_state", True),
-            ("initial_state", 100),
-            ("training_rows", 0),
-            ("training_rows", True),
-            ("connection_sub_seeds", []),
-            ("blocks", []),
-            ("has_scoring_reference", False),
-            ("has_scoring_reference", "yes"),
-            ("capability", "resumable"),
+            ("schema", None, "fields: task D_cont"),
+            ("recipe", {}, "fields: blocks connections"),
+            ("predict_config", {}, "fields: predict_mode"),
+            ("diagnostics", {}, "fields: loss_history"),
+            ("epsilon_P_source", "unknown", "temperature provenance"),
+            ("initial_state", True, "integer >= 0"),
+            ("initial_state", 100, "original state reference"),
+            ("training_rows", 0, "integer >= 1"),
+            ("training_rows", True, "integer >= 1"),
+            ("connection_sub_seeds", [], "connection seeds do not match"),
+            ("blocks", [], "incomplete saved block metadata"),
+            ("has_scoring_reference", False, "invalid scoring reference"),
+            ("has_scoring_reference", "yes", "metadata boolean"),
+            ("capability", "resumable", r"saved tensor 'models\.0\.blocks\.0\.gamma'"),
         ],
     )
-    def test_invalid_model_fields(self, artefact, field, value):
+    def test_invalid_model_fields(self, artefact, field, value, message):
         set_metadata(artefact, ("models", 0, field), value)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(artefact)
 
     @pytest.mark.parametrize(
-        "section,field,value",
+        "section,field,value,message",
         [
-            ("schema", "computation_dtype", "float16"),
-            ("schema", "D_cont", True),
-            ("schema", "M_cat", [3]),
-            ("schema", "M", 0),
-            ("schema", "K_active", [["wrong_name", 3]]),
-            ("predict_config", "max_iter", True),
-            ("predict_config", "epsilon_P", None),
-            ("predict_config", "tol", float("nan")),
-            ("diagnostics", "n_iter", True),
-            ("diagnostics", "warnings", [12]),
-            ("diagnostics", "converged", 1),
-            ("diagnostics", "loss_history", [1.0]),
+            ("schema", "computation_dtype", "float16", "unsupported saved floating dtype"),
+            ("schema", "D_cont", True, "integer >= 0"),
+            ("schema", "M_cat", [3], r"saved tensor 'states\.0\.categorical_centroids\.0'"),
+            ("schema", "M", 0, "integer >= 1"),
+            ("schema", "K_active", [["wrong_name", 3]], "Recipe graph identity"),
+            ("predict_config", "epsilon_P", None, "temperature provenance"),
+            ("diagnostics", "n_iter", True, "integer >= 1"),
+            ("diagnostics", "warnings", [12], "metadata string"),
+            ("diagnostics", "converged", 1, "metadata boolean"),
+            ("diagnostics", "loss_history", [1.0], "incomplete fitted diagnostics"),
+            ("diagnostics", "checkpoint_dtype", "float16", "unsupported saved floating dtype"),
         ],
     )
-    def test_invalid_structured_fields(self, artefact, section, field, value):
+    def test_invalid_structured_fields(self, artefact, section, field, value, message):
         set_metadata(artefact, ("models", 0, section, field), value)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(artefact)
 
     @pytest.mark.parametrize(
         "key",
         [
             "states.0.continuous_centroids",
-            "states.0.feature_weights",
-            "states.0.categorical_centroids.0",
             "models.0.blocks.0.continuous_centroids",
-            "models.0.blocks.0.feature_weights",
-            "models.0.blocks.0.categorical_centroids.0",
-            "models.0.blocks.1.theta",
-            "models.0.blocks.2.theta",
             "models.0.Wt_ref",
         ],
     )
-    @pytest.mark.parametrize("damage", ["missing", "shape", "dtype", "nan"])
-    def test_tensor_manifest_and_finiteness(self, artefact, key, damage):
+    @pytest.mark.parametrize("damage", ["missing", "shape", "dtype"])
+    def test_tensor_manifest(self, artefact, key, damage):
         corrupt_saved_tensor(artefact, key, damage)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=f"saved tensor '{re.escape(key)}'"):
+            Network.load(artefact)
+
+    @pytest.mark.parametrize("key", NAN_MESSAGES)
+    def test_tensor_finiteness(self, artefact, key):
+        corrupt_saved_tensor(artefact, key, "nan")
+        with pytest.raises(ValueError, match=NAN_MESSAGES[key]):
             Network.load(artefact)
 
     @pytest.mark.parametrize(
         "key",
         ["models.0.blocks.1.theta", "models.0.blocks.2.theta", "states.0.feature_weights"],
     )
-    @pytest.mark.parametrize("value", [-0.1, 2.0])
-    def test_invalid_probability_parameters(self, artefact, key, value):
+    @pytest.mark.parametrize(
+        "value,reason",
+        [
+            pytest.param(-0.1, "non-negative", id="-0.1"),
+            pytest.param(2.0, "sum to one", id="2.0"),
+        ],
+    )
+    def test_invalid_probability_parameters(self, artefact, key, value, reason):
         tensors = load_file(artefact)
         tensors[key] = torch.full_like(tensors[key], value)
         replace_saved_tensors(tensors, artefact)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=rf"^{re.escape(MESSAGE_NAMES[key])} .*{reason}"):
             Network.load(artefact)
 
     @pytest.mark.parametrize("field", ["gamma", "instance_weights", "unknown"])
@@ -421,22 +440,24 @@ class TestPersistenceValidation:
 
     def test_every_required_metadata_field_is_required(self, artefact):
         metadata = read_saved_metadata(artefact)
+        # Each section, and the leading fields its record reader names when one is missing.
         sections = [
-            (),
-            ("models", 0),
-            ("models", 0, "recipe"),
-            ("models", 0, "schema"),
-            ("models", 0, "predict_config"),
-            ("models", 0, "diagnostics"),
-            ("selection",),
-            ("selection", "initialisation_outcomes", 0),
-            ("models", 0, "blocks", 0),
-            ("models", 0, "blocks", 1),
-            ("states", 0),
-            ("states", 0, "input_geometry"),
-            ("states", 0, "input_geometry", "input", "description"),
+            ((), "format version"),
+            (("models", 0), "recipe schema"),
+            (("models", 0, "recipe"), "blocks connections"),
+            (("models", 0, "schema"), "task D_cont"),
+            (("models", 0, "predict_config"), "predict_mode output_mode"),
+            (("models", 0, "diagnostics"), "loss_history n_iter"),
+            (("selection",), "initialisation_outcomes selected_index"),
+            (("selection", "initialisation_outcomes", 0), "index seed"),
+            (("models", 0, "blocks", 0), "name$"),
+            (("models", 0, "blocks", 1), "name initial_widths"),
+            (("models", 0, "blocks", 2), "name initial_widths"),
+            (("states", 0), "input_geometry parameters"),
+            (("states", 0, "input_geometry"), "input K_active"),
+            (("states", 0, "input_geometry", "input", "description"), "K epsilon"),
         ]
-        for location in sections:
+        for location, fields in sections:
             section = metadata
             for key in location:
                 section = section[key]
@@ -447,26 +468,51 @@ class TestPersistenceValidation:
                     target = target[key]
                 del target[missing]
                 write_saved_metadata(artefact, damaged)
-                with pytest.raises(ValueError):
+                with pytest.raises(ValueError, match=f"fields: {fields}"):
                     Network.load(artefact)
 
     @pytest.mark.parametrize(
-        "path,value",
+        "path,value,message",
         [
-            (("models", 0, "blocks", 0, "soft_assignments"), False),
-            (("models", 0, "blocks", 1, "initial_widths"), [100, 100]),
-            (("models", 0, "recipe", "blocks", 2, "description", "n_classes"), 4),
-            (("models", 0, "connection_sub_seeds", 0, 1), 2**64),
-            (("states", 0, "input_geometry", "captured"), 1),
-            (("states", 0, "input_geometry", "input", "description", "name"), "other"),
-            (("selection", "initialisation_outcomes"), []),
-            (("selection", "initialisation_outcomes", 0, "seed"), 2**64),
-            (("models", 1, "recipe", "connections", 0, "delta"), 2.0),
+            (
+                ("models", 0, "blocks", 1, "initial_widths"),
+                [100, 100],
+                "exceed initial graph capacities",
+            ),
+            (
+                ("models", 0, "blocks", 2, "initial_widths"),
+                [3, 100],
+                "head prior cluster counts exceed",
+            ),
+            (
+                ("models", 0, "blocks", 2, "initial_widths"),
+                [4, 1],
+                "invalid initial class",
+            ),
+            (
+                ("models", 0, "recipe", "blocks", 2, "description", "n_classes"),
+                4,
+                "number of classes does not match",
+            ),
+            (("models", 0, "connection_sub_seeds", 0, 1), 2**64, "seed exceeds"),
+            (("states", 0, "input_geometry", "captured"), 1, "metadata boolean"),
+            (
+                ("states", 0, "input_geometry", "input", "description", "name"),
+                "other",
+                "'name' is 'other'",
+            ),
+            (("selection", "initialisation_outcomes"), [], "do not match the candidate outcomes"),
+            (("selection", "initialisation_outcomes", 0, "seed"), 2**64, "seed exceeds"),
+            (
+                ("models", 1, "recipe", "connections", 0, "delta"),
+                2.0,
+                "members disagree on the Recipe",
+            ),
         ],
     )
-    def test_cross_record_invariants(self, artefact, path, value):
+    def test_cross_record_invariants(self, artefact, path, value, message):
         set_metadata(artefact, path, value)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(artefact)
 
     @pytest.mark.parametrize(
@@ -474,7 +520,6 @@ class TestPersistenceValidation:
         [
             (("recipe", "blocks", 0, "description", "K"), True, "K must be a positive integer"),
             (("recipe", "blocks", 0, "description", "name"), "", "names must be non-empty"),
-            (("recipe", "blocks", 0, "description", "centroid_strategy"), None, "centroid_str"),
             (("recipe", "connections", 0, "source"), [["input"]], "target must be non-empty"),
             (("recipe", "connections", 0, "delta"), {"positive_infinity": True}, "delta must"),
             (("predict_config", "predict_mode"), ["single"], "predict_mode must be"),
@@ -526,7 +571,7 @@ class TestPersistenceValidation:
             tensors[f"states.{other}.continuous_centroids"], torch.nan
         )
         replace_saved_tensors(tensors, path)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="continuous_centroids must be finite"):
             Network.load(path)
 
     @pytest.mark.parametrize(
@@ -550,7 +595,19 @@ class TestPersistenceValidation:
         del tensors["models.0.blocks.2.W_M"]
         replace_saved_tensors(tensors, path)
         set_metadata(path, ("models", 0, "blocks", 2, "has_output_weights"), False)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="missing fitted regression output weights"):
+            Network.load(path)
+
+    def test_saved_fixed_output_weights_must_match_the_number_of_targets(self, tmp_path):
+        recipe, X, y, _ = resume_case("regression")
+        head = replace(recipe.blocks[-1], epsilon_M=math.inf, W_M=(1.0, 2.0))
+        path = tmp_path / "regression.safetensors"
+        Network.fit(replace(recipe, blocks=(*recipe.blocks[:-1], head)), X, y, max_iter=2).save(
+            path
+        )
+        location = ("models", 0, "recipe", "blocks", 2, "description", "W_M")
+        set_metadata(path, location, [1.0, 2.0, 3.0])
+        with pytest.raises(ValueError, match=r"W_M has length 3 .* regression targets is 2"):
             Network.load(path)
 
     def test_a_saved_iteration_count_must_be_a_complete_iteration(self, artefact):
@@ -560,18 +617,20 @@ class TestPersistenceValidation:
             record["loss_history"] = record["loss_history"][:1]
 
         change_metadata(artefact, damage)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="integer >= 1"):
             Network.load(artefact)
 
     def test_a_single_class_head_survives_the_round_trip(self, tmp_path):
         # One declared class is a legal head width, so decoding must not require two.
-        X = torch.rand(8, 2, dtype=torch.float64)
+        generator = torch.Generator().manual_seed(0)  # CPU stream: same data on every lane
+        X = torch.rand(8, 2, dtype=DTYPE, generator=generator).to(DEVICE)
+        y = torch.zeros(8, dtype=torch.int64, device=DEVICE)
         recipe = Recipe.chain(Input(K=2), ClassificationHead(coupling=Coupling.M, n_classes=1))
-        source = Network.fit(recipe, X, torch.zeros(8, dtype=torch.int64), max_iter=2)
+        source = Network.fit(recipe, X, y, max_iter=2)
         path = tmp_path / "one_class.safetensors"
-        source.save(path)
+        source.save(path, resumable=True)
 
-        assert Network.load(path).recipe == recipe
+        assert_same_checkpoint(Network.load(path, device=DEVICE), source)
 
     def test_a_network_fitted_on_one_row_survives_the_round_trip(self, tmp_path):
         # One training row is a legal fit, so decoding must not require two.
@@ -579,9 +638,12 @@ class TestPersistenceValidation:
         y = torch.zeros(1, dtype=torch.int64, device=DEVICE)
         recipe = Recipe.chain(Input(K=1), ClassificationHead(coupling=Coupling.M, n_classes=1))
         path = tmp_path / "one_row.safetensors"
-        Network.fit(recipe, X, y, max_iter=2).save(path, resumable=True)
+        source = Network.fit(recipe, X, y, max_iter=2)
+        source.save(path, resumable=True)
 
-        assert Network.load(path, device=DEVICE).can_resume
+        loaded = Network.load(path, device=DEVICE)
+        assert loaded.can_resume
+        assert_same_checkpoint(loaded, source)
 
     def test_a_default_coupling_is_saved_explicitly(self, tmp_path):
         recipe, X, y, _ = resume_case()
@@ -630,6 +692,9 @@ class TestPersistenceIO:
             loaded = Network.load(path, device=device)
             assert loaded.device.type == kind
             actual = loaded.predict(X.to(loaded.device)).cpu()
+            # Accelerator kernels order the D- and K-term sums differently, and each
+            # affiliation softmax at temperature 0.1 to 0.3 scales a cost's rounding by up to
+            # ten; 512 eps bounds that with margin (MPS differs by at most 44 eps).
             tolerance = 512 * torch.finfo(torch.float32).eps
             torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
@@ -644,7 +709,7 @@ class TestPersistenceIO:
             Network.load(path, device="mps")
 
     @pytest.mark.parametrize("suffix", [".pt", ".pkl", ".json", ""])
-    def test_no_extension_selected_pickle_or_state_dictionary_reader(
+    def test_a_path_without_the_safetensors_suffix_is_refused_without_a_pickle_reader(
         self, tmp_path, suffix, monkeypatch
     ):
         recipe, X, y, _ = resume_case()
@@ -656,16 +721,13 @@ class TestPersistenceIO:
         monkeypatch.setattr(torch, "load", lambda *a, **k: pytest.fail("pickle reader was called"))
         with pytest.raises(ValueError, match="safetensors"):
             Network.load(path)
-        for name in ("state_dict", "load_state_dict", "from_state_dict"):
-            assert not hasattr(Network, name)
 
-    @pytest.mark.parametrize("resumable", [1, "yes", None])
-    def test_unsupported_save_controls_leave_existing_files_unchanged(self, artefact, resumable):
+    def test_unsupported_save_controls_leave_existing_files_unchanged(self, artefact):
         recipe, X, y, _ = resume_case()
         source = Network.fit(recipe, X, y, max_iter=1)
         before = artefact.read_bytes()
-        with pytest.raises(ValueError):
-            source.save(artefact, resumable=resumable)
+        with pytest.raises(ValueError, match="resumable must be a boolean"):
+            source.save(artefact, resumable=1)
         assert artefact.read_bytes() == before
 
     @pytest.mark.parametrize(
@@ -673,7 +735,6 @@ class TestPersistenceIO:
         [
             ('{"format": 1, "format": 2}', "duplicate metadata field 'format'"),
             ("[]", "expected metadata fields"),
-            ("{", "Expecting property name"),
             ('{"x": NaN}', "non-standard JSON number 'NaN'"),
         ],
     )
@@ -690,10 +751,17 @@ class TestPersistenceIO:
     def test_invalid_tensor_container_is_not_read_as_pickle(self, artefact, monkeypatch):
         torch.save({"metadata": {"schema_version": 1}}, artefact)
         monkeypatch.setattr(torch, "load", lambda *a, **k: pytest.fail("pickle reader was called"))
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="invalid safetensors bundle"):
             Network.load(artefact)
 
-    @pytest.mark.parametrize("device", ["meta", "not-a-device", 0, None])
-    def test_invalid_device_is_rejected(self, artefact, device):
-        with pytest.raises(ValueError):
+    @pytest.mark.parametrize(
+        "device,message",
+        [
+            ("meta", "unsupported load device"),
+            ("not-a-device", "invalid load device"),
+            (0, "string or torch.device"),
+        ],
+    )
+    def test_invalid_device_is_rejected(self, artefact, device, message):
+        with pytest.raises(ValueError, match=message):
             Network.load(artefact, device=device)

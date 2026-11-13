@@ -118,7 +118,7 @@ def parameter_variants():
                 else RegressionHead(name="labels")
             )
             new_head = (
-                ClassificationHead(Coupling.S, n_classes=4, name="response")
+                ClassificationHead(Coupling.S, n_classes=4, theta_alpha=1.5, name="response")
                 if head_type is ClassificationHead
                 else RegressionHead(W_M=(0.2, 0.8), name="response")
             )
@@ -149,6 +149,13 @@ def parameter_variants():
             yield old, new
     old = Recipe.chain(Input(), RegressionHead())
     yield old, old.replace_block("output", epsilon_M=0.2)
+    old = Recipe.chain(Input(), Hidden(epsilon=0.1), RegressionHead())
+    yield (
+        old,
+        old.replace_block("hidden_1", epsilon=None, epsilon_ratio=1.5).replace_connection(
+            "hidden_1_to_output", delta=None, delta_ratio=3.0
+        ),
+    )
 
 
 def fitted_query_model(estimator_type, manifold=False, *, epsilon_T=0.5, sample_weight=False):

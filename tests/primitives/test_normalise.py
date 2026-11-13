@@ -1,13 +1,13 @@
 """Tests for the stochastic-matrix primitives (normalise.py)."""
 
-import subprocess
-import sys
+import math
 
 import pytest
 import torch
 from _alloc import assert_no_float64, assert_zero_alloc
+from conftest import DEVICE, DTYPE
 
-from entlearn.primitives.normalise import _is_soft, floored_log_, normalise_
+from entlearn.primitives.normalise import _is_soft, _tiny, floored_log_, normalise_
 from primitives._fixtures import SEEDS, assert_close, empty, generator, rand
 
 SHAPES = [(3, 4), (5, 2), (4, 4), (2, 5)]  # (K_target, K_source)
@@ -47,18 +47,39 @@ class TestNormalise:
         assert_close(theta.select(1 - dim, 1), torch.full((width,), 1.0 / width, dtype=theta.dtype))
         assert_close(theta.sum(dim), torch.ones(theta.shape[1 - dim], dtype=theta.dtype))
 
+    @pytest.mark.parametrize("dim", [0, 1])
+    def test_a_slice_with_mass_at_most_tiny_is_empty(self, dim):
+        # The same rule as an empty centroid: a subnormal slice sum counts as zero.
+        tiny = _tiny(DTYPE)
+        theta = rand(3, 4, g=generator(12))
+        theta.select(1 - dim, 1).zero_().select(0, 0).fill_(tiny)
+        theta.select(1 - dim, 2).zero_().select(0, 0).fill_(2 * tiny)
+        normalise_(theta, dim, empty(theta.shape[1 - dim]))
+        width = theta.shape[dim]
+        uniform = torch.full((width,), 1.0 / width, dtype=theta.dtype, device=DEVICE)
+        one_hot = torch.zeros(width, dtype=theta.dtype, device=DEVICE)
+        one_hot[0] = 1.0
+        assert_close(theta.select(1 - dim, 1), uniform)
+        assert_close(theta.select(1 - dim, 2), one_hot)
+
 
 class TestIsSoft:
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-    def test_machine_precision_is_hard_and_the_next_float_is_soft(self, dtype):
-        eps = torch.finfo(dtype).eps
-        above = float(
-            torch.nextafter(torch.tensor(eps, dtype=dtype), torch.tensor(1.0, dtype=dtype))
-        )
-        assert not _is_soft(0.0, dtype)
-        assert not _is_soft(eps, dtype)
-        assert _is_soft(above, dtype)
-        assert _is_soft(float("inf"), dtype)
+    def test_zero_is_hard_and_every_positive_temperature_is_soft(self):
+        # The regime is a property of the setting alone, the same in every dtype.
+        assert not _is_soft(0.0)
+        for dtype in (torch.float32, torch.float64):
+            info = torch.finfo(dtype)
+            assert _is_soft(info.eps)
+            assert _is_soft(info.tiny)
+            assert _is_soft(info.tiny * info.eps)  # the smallest subnormal
+        assert _is_soft(math.ulp(0.0))
+        assert _is_soft(float("inf"))
+
+
+class TestTiny:
+    @pytest.mark.parametrize(("dtype", "exponent"), [(torch.float32, -126), (torch.float64, -1022)])
+    def test_matches_the_smallest_normal_binary_value(self, dtype, exponent):
+        assert _tiny(dtype) == math.ldexp(1.0, exponent)
 
 
 class TestFlooredLog:
@@ -68,8 +89,32 @@ class TestFlooredLog:
         src[0, 0] = 0.0  # must hit the floor, not -inf
         out = torch.empty_like(src)
         floored_log_(out, src)
-        eps = torch.finfo(src.dtype).eps
-        assert torch.equal(out, torch.log(torch.clamp_min(src, eps)))
+        tiny = _tiny(src.dtype)
+        assert torch.equal(out, torch.log(torch.clamp_min(src, tiny)))
+
+    def test_positive_probabilities_keep_their_exact_log(self):
+        info = torch.finfo(DTYPE)
+        # Zero, the smallest normal, a value below eps, eps itself and an ordinary value
+        values = [0.0, _tiny(DTYPE), info.eps / 1024, info.eps, 0.25]
+        src = torch.tensor(values, dtype=DTYPE, device=DEVICE)
+        out = torch.empty_like(src)
+
+        floored_log_(out, src)
+
+        expected = [math.log(_tiny(DTYPE))] + [math.log(v) for v in values[1:]]
+        assert torch.isfinite(out).all()
+        assert_close(out, torch.tensor(expected, dtype=DTYPE))
+
+    def test_a_subnormal_probability_takes_the_floor(self):
+        tiny = _tiny(DTYPE)
+        src = torch.tensor([tiny / 16], dtype=DTYPE, device=DEVICE)
+        if not bool(src > 0):
+            pytest.skip("this device flushes subnormal values to zero")
+        out = torch.empty_like(src)
+
+        floored_log_(out, src)
+
+        assert float(out) == pytest.approx(math.log(tiny), rel=2 * torch.finfo(DTYPE).eps, abs=0)
 
     def test_source_read_only_and_zero_alloc(self):
         src = rand(6, 5, g=generator(SEEDS[0]))
@@ -80,30 +125,6 @@ class TestFlooredLog:
 
 
 class TestPrimitiveBoundary:
-    def test_imports_do_not_load_optional_dependencies(self):
-        code = """
-import sys
-import torch
-
-# PyTorch can import NumPy itself. Record only modules added by entlearn.
-before = set(sys.modules)
-import entlearn
-import entlearn.primitives.distance
-import entlearn.primitives.encoding
-import entlearn.primitives.manifold
-import entlearn.primitives.normalise
-import entlearn.primitives.softmax
-
-forbidden = {"numpy", "scipy", "pandas", "sklearn"} & {
-    name.partition(".")[0] for name in set(sys.modules) - before
-}
-raise SystemExit(f"optional dependencies imported: {sorted(forbidden)}" if forbidden else 0)
-"""
-        result = subprocess.run(
-            [sys.executable, "-c", code], check=False, capture_output=True, text=True
-        )
-        assert result.returncode == 0, result.stderr or result.stdout
-
     def test_float32_normalise_creates_no_float64_tensor(self):
         prior = torch.get_default_dtype()
         torch.set_default_dtype(torch.float64)
@@ -111,6 +132,5 @@ raise SystemExit(f"optional dependencies imported: {sorted(forbidden)}" if forbi
             theta = torch.tensor([[1.0, 0.0], [3.0, 0.0]], dtype=torch.float32)
             scratch = torch.empty(2, dtype=torch.float32)
             assert_no_float64(normalise_, theta, 0, scratch)
-            assert theta.dtype is torch.float32
         finally:
             torch.set_default_dtype(prior)

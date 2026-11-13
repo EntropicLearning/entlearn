@@ -33,7 +33,7 @@ jobs:
         run: uv python install
 
       - name: Build the docs
-        run: uv run --group docs mkdocs build --strict
+        run: uv run --all-extras poe docs-build
 
   deploy:
     # Versioned publishing only: a released version plus the "latest" alias, via
@@ -64,6 +64,9 @@ jobs:
 
       # Release tags are vX.Y.Z; the site version drops the v (/0.1.0/), which is
       # the path the entlearn skills link to.
+      - name: Render the tutorials
+        run: uv run --all-extras poe docs-export
+
       - name: Deploy the versioned docs with mike
         env:
           TAG: ${{ github.event.release.tag_name }}

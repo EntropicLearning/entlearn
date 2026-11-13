@@ -1,6 +1,8 @@
 # Tutorials
 
-In this section, you can find a set of tutorial notebooks meant to provide a starting point for learning how to use the package. [Tutorial series](series.md) lists the available notebooks, with source and molab links.
+The [tutorial series](series.md) walks through fitting, inspecting and selecting a
+network. Each tutorial has a rendered page with its outputs, a Python source link,
+and a molab link for running it in server mode.
 
 ## How to run the notebooks
 The notebooks are included in the source code, so you can run them locally with ease.
@@ -25,4 +27,4 @@ uv run marimo export html --no-sandbox examples/01_first_network.py -o first-net
 
 An HTML snapshot preserves figures but does not rerun Python when a control changes.
 
-For more information, see the [marimo documentation](https://marimo.io/)
+For more information, see the [marimo documentation](https://marimo.io/).

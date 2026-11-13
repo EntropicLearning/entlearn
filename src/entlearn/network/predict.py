@@ -19,6 +19,7 @@ from entlearn.network.reconstruct import reconstruct_from_affiliations
 from entlearn.network.refine import refine_prediction_
 from entlearn.network.session import _CompiledGraph, _Workspace
 from entlearn.network.state import PredictionResult
+from entlearn.primitives.normalise import _scratch_view
 from entlearn.primitives.reductions import compute_wt_cost_
 from entlearn.primitives.softmax import assign_simplex_
 
@@ -42,7 +43,7 @@ class _PredictionInputCache:
             self.gamma,
             self.sqdist,
             self.categorical_cost,
-            self.workspace.matrix[: self.X.shape[0], : self.gamma.shape[1]],
+            _scratch_view(self.workspace.matrix, self.gamma.shape[1], self.X.shape[0]),
         )
 
 
@@ -57,15 +58,13 @@ def _input_affiliations(
     X, X_cat = block.validate_prediction_input(X_cont_new, X_cat_new)
     T = X.shape[0]
     max_clusters = max(graph.affiliations(name).shape[1] for name in graph.order[:-1])
-    workspace = _Workspace.allocate(
-        T, max_clusters, graph.head.output_width, dtype=X.dtype, device=X.device
-    )
+    workspace = _Workspace.allocate(T, max_clusters, graph.classes, dtype=X.dtype, device=X.device)
     cost, sqdist, categorical_cost = block.price_query_rows_(X, X_cat, workspace)
     gamma = torch.empty_like(cost)
     # The fit assembles a Wt-weighted cost and assigns at ``epsilon / T``. Prediction
     # assembles an unweighted cost and assigns at ``epsilon``. The test Wt is the uniform
     # ``1 / T_new``, so the two ``1 / T`` factors cancel and the exponent matches the fit's.
-    # The fitted regime depends on ``epsilon`` and the dtype alone, and is not influenced by the batch size
+    # A positive epsilon assigns softly whatever the batch size and dtype.
     assign_simplex_(
         gamma,
         cost,
@@ -117,15 +116,10 @@ def _forward(
     return query, gammas
 
 
-def _head_logits(
-    graph: _CompiledGraph,
-    X_cont: torch.Tensor,
-    X_cat: Sequence[torch.Tensor],
-) -> torch.Tensor:
-    """Return unscaled geometric logits using single-pass affiliations."""
+def _head_logits(graph: _CompiledGraph, gammas: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Return unscaled geometric logits from a forward pass's affiliations."""
     head = graph.head
     assert isinstance(head, _ClassificationBlock)
-    _, gammas = _forward(graph, X_cont, X_cat_new=X_cat)
     gamma = gammas[graph.connection_into(head).source]
     logits = torch.empty(gamma.shape[0], head.output_width, dtype=gamma.dtype, device=gamma.device)
     head.logits_(logits, gamma)
@@ -149,8 +143,7 @@ def predict(
         or any(not isinstance(name, str) or name not in supported for name in details)
     ):
         raise ValueError("unknown prediction detail")
-    recovering = has_instance_weight_recovery(graph.input)
-    if "instance_weights" in details and not recovering:
+    if "instance_weights" in details and not has_instance_weight_recovery(graph.input):
         raise ValueError(
             "recovering instance_weights requires learning them during training with finite "
             "epsilon_T and retaining a finite log_partition. Frozen or hard instance weights "
@@ -158,10 +151,24 @@ def predict(
         )
     validate_predict_init(graph, config, predict_init)
     query, gammas = _forward(graph, X_cont_new, X_cat_new=X_cat_new)
+    return _read_out(graph, query, gammas, config, predict_init=predict_init, details=details)
+
+
+def _read_out(
+    graph: _CompiledGraph,
+    query: _PredictionInputCache,
+    gammas: dict[str, torch.Tensor],
+    config: PredictConfig,
+    *,
+    predict_init: str | int | torch.Tensor | None = None,
+    details: Sequence[str] = (),
+) -> PredictionResult:
+    """Read out a forward pass under ``config`` and copy the requested details."""
+    recovering = has_instance_weight_recovery(graph.input)
     workspace = query.workspace
     head = graph.head
     gamma = gammas[graph.connection_into(head).source]
-    delta = graph.connection_into(head).delta
+    delta = graph.head_delta
     output = torch.empty(gamma.shape[0], head.output_width, dtype=gamma.dtype, device=gamma.device)
     if isinstance(head, _ClassificationBlock):
         if config.output_mode == "arithmetic":

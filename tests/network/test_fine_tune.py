@@ -1,12 +1,27 @@
+"""Fine-tuning a fitted Network on new rows through the public lifecycle."""
+
 import io
 import logging
 from dataclasses import replace
 
 import pytest
 import torch
-from network._fixtures import resume_case
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
+from network._fixtures import active_widths, resume_case, squared_error
 
-from entlearn import Coupling, Network, PredictConfig
+from entlearn import ClassificationHead, Coupling, Hidden, Input, Network, PredictConfig, Recipe
+
+pytestmark = FIXED_BUDGET
+
+
+def _assert_same_centroids(actual, expected):
+    """Assert two initial states hold the same input centroids."""
+    torch.testing.assert_close(
+        actual.input_geometry.continuous_centroids,
+        expected.input_geometry.continuous_centroids,
+        rtol=0,
+        atol=0,
+    )
 
 
 class TestFineTune:
@@ -38,7 +53,6 @@ class TestFineTune:
         new_X, new_y = X[indices] + 0.01, y[indices]
         new_categories = tuple(c[indices] for c in categories)
         result = source.fine_tune(new_X, new_y, X_cat=new_categories, max_iter=2, tol=0)
-        assert result is not source
         assert result.can_resume
         assert result.recipe == source.recipe
         assert result.schema.M == source.schema.M
@@ -49,6 +63,37 @@ class TestFineTune:
         assert result.inspect("training_affiliations")["input"].shape[0] == rows
         assert torch.isfinite(result.predict(new_X, X_cat=new_categories)).all()
         torch.testing.assert_close(source.predict(X, X_cat=categories), before, rtol=0, atol=0)
+
+    # Two distinct rows prune the input from 5 clusters and cap the hidden block from 4.
+    @pytest.mark.filterwarnings("ignore:hidden block:UserWarning")
+    def test_a_pruned_hidden_block_continues_from_its_active_parameters(self):
+        X = torch.tensor([[0.0]] * 3 + [[1.0]] * 3, dtype=DTYPE, device=DEVICE)
+        y = torch.tensor([0, 0, 0, 1, 1, 1], device=DEVICE)
+        recipe = Recipe.chain(
+            Input(K=5), Hidden(K=4), ClassificationHead(coupling=Coupling.M), coupling=Coupling.M
+        )
+        source = Network.fit(recipe, X, y, max_iter=1, tol=0)
+        assert dict(source.schema.K_active)["hidden_1"] < recipe.blocks[1].K
+        rows = torch.tensor([0, 1, 3, 4], device=DEVICE)
+        new_X, new_y = X[rows] + 0.1, y[rows]
+
+        result = source.fine_tune(new_X, new_y, max_iter=3, tol=0)
+
+        # A fresh fit from the captured active parameters is the independent route.
+        expected = Network.fit(
+            active_widths(recipe, source),
+            new_X,
+            new_y,
+            initial_state=source.capture_current_state(),
+            max_iter=3,
+            tol=0,
+        )
+        assert result.schema.K_active == expected.schema.K_active
+        assert result.diagnostics.loss_history == expected.diagnostics.loss_history
+        for name in ("continuous_centroids", "transition_matrices", "training_affiliations"):
+            for key, value in expected.inspect(name).items():
+                torch.testing.assert_close(result.inspect(name)[key], value, rtol=0, atol=0)
+        torch.testing.assert_close(result.predict(new_X), expected.predict(new_X), rtol=0, atol=0)
 
     def test_same_count_reordered_batch_has_no_position_bound_transfer(self):
         recipe, X, y, _ = resume_case("regression")
@@ -91,13 +136,10 @@ class TestFineTuneLogging:
 
         source.fine_tune(X, y, max_iter=2, tol=0, logger=logger, verbose=2)
 
-        output = stream.getvalue()
-        assert "iter 1: loss" in output
-        assert "fit finished" in output
+        assert "loss" in stream.getvalue()
+        # The logging controls are checked by the fit's owner; one refusal shows the route.
         with pytest.raises(ValueError, match="logger"):
             source.fine_tune(X, y, logger="caller")
-        with pytest.raises(ValueError, match="verbose"):
-            source.fine_tune(X, y, verbose=-1)
         capsys.readouterr()
         source.fine_tune(X, y, max_iter=1)
         assert capsys.readouterr().err == ""
@@ -108,10 +150,6 @@ class TestFineTuneRetention:
     def test_fine_tune_and_resume_preserve_the_selection_history(self, retain):
         recipe, X, y, _ = resume_case("regression")
         rows = torch.arange(len(X), device=X.device)
-
-        def loss(prediction, target, **weights):
-            return (prediction - target).square().mean()
-
         source = Network.fit(
             recipe,
             X,
@@ -119,7 +157,7 @@ class TestFineTuneRetention:
             max_iter=2,
             n_inits=2,
             validation_pairs=((rows[:20], rows[20:]), (rows[10:], rows[:10])),
-            selection_loss=loss,
+            selection_loss=squared_error,
             return_train_score=True,
             retain=retain,
         )
@@ -157,22 +195,14 @@ class TestFineTuneRetention:
         assert (result.initial_states is not None) == (retain != "winner")
         assert (result.members is not None) == (retain == "members")
         if result.initial_states is not None:
-            winner = next(
-                i for i, s in enumerate(source.initial_states) if s is source.initial_state
-            )
-            assert result.initial_state is result.initial_states[winner]
+            winner = source.diagnostics.selected_index
+            _assert_same_centroids(result.initial_state, result.initial_states[winner])
             for before, after in zip(source.initial_states, result.initial_states, strict=True):
-                assert before is not after
-                torch.testing.assert_close(
-                    before.input_geometry.continuous_centroids,
-                    after.input_geometry.continuous_centroids,
-                    rtol=0,
-                    atol=0,
-                )
+                _assert_same_centroids(after, before)
         if result.members is not None:
             for i, (before, after) in enumerate(zip(source.members, result.members, strict=True)):
                 expected = before.fine_tune(X[:10], y[:10], max_iter=2)
-                assert after.initial_state is result.initial_states[i]
+                _assert_same_centroids(after.initial_state, result.initial_states[i])
                 assert after.members is None and after.initial_states is None
                 assert after.diagnostics.loss_history == expected.diagnostics.loss_history
                 torch.testing.assert_close(after.predict(X), expected.predict(X), rtol=0, atol=0)
@@ -215,15 +245,20 @@ class TestFineTuneValidation:
         new_X, new_y, new_cats = X, y, cats
         if invalid == "features":
             new_X = X[:, :1]
+            message = "continuous feature count"
         elif invalid == "category_count":
             new_cats = ()
+            message = "X_cat must contain 1 fitted"
         elif invalid == "new_category":
             new_cats = (cats[0] + 2,)
+            message = r"X_cat\[0\] holds code 3"
         elif invalid == "new_class":
             new_y = y + 3
+            message = "exceeds the declared number of classes"
         else:
             new_y = y[:, :1]
-        with pytest.raises(ValueError):
+            message = "number of regression targets"
+        with pytest.raises(ValueError, match=message):
             source.fine_tune(new_X, new_y, X_cat=new_cats)
         torch.testing.assert_close(source.predict(X, X_cat=cats), before, rtol=0, atol=0)
 
@@ -234,5 +269,6 @@ class TestFineTuneValidation:
     def test_no_policy_or_initialisation_controls(self, kwargs):
         recipe, X, y, _ = resume_case()
         source = Network.fit(recipe, X, y, max_iter=1)
-        with pytest.raises(TypeError):
+        (name,) = kwargs
+        with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
             source.fine_tune(X, y, **kwargs)

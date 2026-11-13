@@ -4,12 +4,16 @@ import pickle
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET, RANK_DEFICIENT
 from network._fixtures import resume_case
 
 from entlearn import Network
 
+pytestmark = FIXED_BUDGET
+
 
 class TestResumeSharedState:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("kind", ["standard", "categorical", "manifold"])
     def test_prefix_fit_resumes_the_same_trajectory_after_transport(self, task, kind):
@@ -36,7 +40,10 @@ class TestResumeSharedState:
         assert continued.diagnostics.loss_history == full.diagnostics.loss_history
         assert continued.diagnostics.n_iter == full.diagnostics.n_iter
         torch.testing.assert_close(
-            continued.predict(X, X_cat=categories), full.predict(X, X_cat=categories)
+            continued.predict(X, X_cat=categories),
+            full.predict(X, X_cat=categories),
+            rtol=0,
+            atol=0,
         )
         torch.testing.assert_close(source.predict(X, X_cat=categories), snapshot, rtol=0, atol=0)
         torch.testing.assert_close(

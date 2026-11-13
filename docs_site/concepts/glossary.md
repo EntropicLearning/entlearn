@@ -10,7 +10,7 @@ These terms describe EON's representations, learning and prediction. Package obj
 | **Transition matrix** | A matrix relating source clusters to target clusters or classes. See [Transitions](representation.md#transitions-between-clusterings) |
 | **Coupling** | A transition's normalisation constraint, with columns summing to one under M and rows summing to one under S. See [Coupling conventions](representation.md#transitions-between-clusterings) |
 | **Weights** | Probability vectors controlling contributions of features, training observations or regression output dimensions to the loss. See [Feature, instance and output weights](representation.md#feature-instance-and-output-weights) |
-| **Entropy reward** | A term subtracted from the loss to favour spread-out affiliations or learned weights. See [Entropy rewards](loss.md#entropy-rewards) |
+| **Entropy penalty** | A negative-entropy term added to the loss, smallest for spread-out affiliations or learned weights. See [Entropy penalties](loss.md#entropy-penalties) |
 | **Temperature** | A coefficient balancing entropy against cost. See [Affiliation regimes](learning.md#affiliation-temperatures) and [weight regimes](learning.md#temperatures-and-effective-dimension) |
 | **Effective dimension** | An entropy-based measure of how broadly a distribution spreads its weight. See [Effective dimension](learning.md#temperatures-and-effective-dimension) |
 | **Pruning** | Removal of clusters with numerically zero unweighted affiliation mass and their associated parameters. See [Pruning](learning.md#pruning) |

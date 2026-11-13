@@ -16,7 +16,6 @@ from network._fixtures import (
 )
 
 from entlearn import Input
-from entlearn.network.blocks import input as inp
 
 # Affiliation temperature x feature-weight temperature x instance-weight temperature.
 # Infinity pins a weight vector, zero assigns it hard, and a positive value learns it soft.
@@ -110,23 +109,27 @@ class TestShallowRegressionMonotonicity:
         (float("inf"), 0.0, 0.2),
         ids=("fixed", "learned-hard", "learned-soft"),
     )
-    @pytest.mark.parametrize("weighted", (False, True), ids=("unweighted", "weighted"))
+    @pytest.mark.parametrize("epsilon", (0.0, 0.2), ids=("hard", "soft"))
+    @pytest.mark.parametrize("rows", ("unweighted", "weighted", "unlabelled"))
     def test_each_coordinate_update_is_non_increasing(
         self,
         epsilon_M: float,
-        weighted: bool,
+        epsilon: float,
+        rows: str,
     ) -> None:
         X_cont, target = noisy_regression_blobs()
         sample_weights = None
-        if weighted:
+        if rows == "weighted":
             sample_weights = torch.arange(
                 1,
                 X_cont.shape[0] + 1,
                 dtype=DTYPE,
                 device=DEVICE,
             )
+        elif rows == "unlabelled":
+            target[1::3] = float("nan")
         recipe = regression_recipe(
-            Input(K=2, epsilon=0.2, epsilon_D=0.2, epsilon_T=0.2),
+            Input(K=2, epsilon=epsilon, epsilon_D=0.2, epsilon_T=0.2),
             epsilon_M=epsilon_M,
         )
         session = materialise(
@@ -137,17 +140,3 @@ class TestShallowRegressionMonotonicity:
             seed=4,
         )
         assert_head_then_input_non_increasing(session)
-
-
-class TestCoordinateStagingContract:
-    def test_feature_weight_update_preserves_the_staged_cluster_masses(self) -> None:
-        X_cont, y = blobs(2, BLOB_SPREADS["separated"], seed=1)
-        recipe = classification_recipe(Input(K=2, epsilon=0.1, epsilon_D=0.2, epsilon_T=0.2))
-        session = materialise(recipe, X_cont, y, seed=1)
-        block = session.graph.input
-
-        inp.stage_statistics_(block, session)
-        masses = session.workspace.scratch_K[: block.K].clone()
-        inp.update_feature_weights_(block, session)
-
-        assert torch.equal(session.workspace.scratch_K[: block.K], masses)

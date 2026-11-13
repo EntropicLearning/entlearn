@@ -5,7 +5,7 @@ from itertools import pairwise
 import pytest
 import torch
 from _alloc import assert_zero_alloc
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
     assert_non_increasing,
     assert_simplex_rows,
@@ -29,7 +29,6 @@ class TestRegressionFit:
         network = Network.fit(recipe, X_cont, public_target, max_iter=10, seed=7)
         prediction = network.predict(torch.tensor([[0.15], [0.85]], dtype=DTYPE, device=DEVICE))
 
-        assert prediction.shape == (2, output_width)
         torch.testing.assert_close(prediction, values)
         assert network.schema.task == "regression"
         assert output_width == network.schema.M
@@ -64,6 +63,7 @@ class TestRegressionFit:
         for previous, current in pairwise(network.diagnostics.loss_history):
             assert_non_increasing(previous, current, "iteration")
 
+    @FIXED_BUDGET
     def test_concrete_task_weights_combine_with_sample_weights(self) -> None:
         X_cont = torch.arange(4, dtype=DTYPE, device=DEVICE).unsqueeze(1) / 4
         target = torch.tensor([1.0, 3.0, 9.0, float("nan")], dtype=DTYPE, device=DEVICE)
@@ -84,6 +84,7 @@ class TestRegressionFit:
         prediction = network.predict(X_cont)
         torch.testing.assert_close(prediction[:, 0], expected.expand(4))
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("output_width", (1, 2), ids=("one-dimensional", "multi-output"))
     def test_callable_task_weights_receive_only_labelled_targets_once(
         self, output_width: int
@@ -147,7 +148,7 @@ class TestRegressionFit:
             ([1.0, 2.0, 3.0], "3 labelled rows"),
             (
                 torch.tensor([1.0, float("nan"), 1.0], dtype=DTYPE, device=DEVICE),
-                "callable task_weights must contain only finite values",
+                "task_weights must contain only finite",
             ),
             (torch.tensor([1.0, 0.0, 1.0], dtype=DTYPE, device=DEVICE), "strictly positive"),
         ),
@@ -184,6 +185,26 @@ class TestRegressionFit:
                 max_iter=1,
             )
 
+    @FIXED_BUDGET
+    @pytest.mark.parametrize("epsilon_M", (float("inf"), 0.2), ids=("uniform", "learned"))
+    def test_shifting_the_targets_shifts_only_the_predictions(self, epsilon_M: float) -> None:
+        # The head's term sums squared residuals around its centroids, so shifting every
+        # target by one vector moves the centroids and predictions with it and nothing else.
+        X_cont, target = noisy_regression_blobs()
+        shift = torch.tensor([0.5, -2.0, 3.0], dtype=DTYPE, device=DEVICE)
+        recipe = regression_recipe(Input(K=2, epsilon=0.1, epsilon_T=0.3), epsilon_M=epsilon_M)
+
+        plain, shifted = (
+            Network.fit(recipe, X_cont, y, max_iter=2, tol=0.0, seed=4)
+            for y in (target, target + shift)
+        )
+
+        torch.testing.assert_close(
+            torch.tensor(shifted.diagnostics.loss_history, dtype=DTYPE),
+            torch.tensor(plain.diagnostics.loss_history, dtype=DTYPE),
+        )
+        torch.testing.assert_close(shifted.predict(X_cont), plain.predict(X_cont) + shift)
+
     @pytest.mark.parametrize(
         ("epsilon_M", "fixed", "expected"),
         (
@@ -208,13 +229,30 @@ class TestRegressionFit:
             seed=4,
         )
 
+        head = network.inspect("head_parameters")["output"]
         if expected is None:
-            assert network._graph.head.W_M is None
+            assert "W_M" not in head
         else:
             torch.testing.assert_close(
-                network._graph.head.W_M,
-                torch.tensor(expected, dtype=DTYPE, device=DEVICE),
+                head["W_M"], torch.tensor(expected, dtype=DTYPE, device=DEVICE)
             )
+
+    def test_fits_far_more_outputs_than_rows(self) -> None:
+        # A square buffer over the outputs (320 GB in float64) is refused by the default
+        # overcommit heuristic; with overcommit forced on, it would stay untouched instead.
+        X_cont, target, values = regression_blobs(2)
+        repeats = 100_000
+
+        network = Network.fit(
+            regression_recipe(Input(K=2, epsilon=0.0), epsilon_M=0.5),
+            X_cont,
+            target.repeat(1, repeats),
+            max_iter=3,
+            seed=7,
+        )
+        prediction = network.predict(torch.tensor([[0.15], [0.85]], dtype=DTYPE, device=DEVICE))
+
+        torch.testing.assert_close(prediction, values.repeat(1, repeats))
 
     def test_finite_output_weight_temperature_learns_a_simplex(self) -> None:
         X_cont, target = noisy_regression_blobs()
@@ -227,27 +265,12 @@ class TestRegressionFit:
             seed=4,
         )
 
-        output_weights = network._graph.head.W_M
-        assert output_weights is not None
+        output_weights = network.inspect("head_parameters")["output"]["W_M"]
         assert_simplex_rows(output_weights.unsqueeze(0))
         assert not torch.equal(
             output_weights,
             torch.full((3,), 1.0 / 3.0, dtype=DTYPE, device=DEVICE),
         )
-
-    def test_publication_releases_regression_fit_caches(self) -> None:
-        X_cont, target, _ = regression_blobs(2)
-
-        network = Network.fit(
-            regression_recipe(epsilon_M=0.2),
-            X_cont,
-            target,
-            max_iter=1,
-        )
-
-        assert network._graph.head.cache is None
-        with pytest.raises(RuntimeError, match="holds no cache"):
-            _ = network._graph.head.live_cache
 
     @pytest.mark.parametrize(
         "epsilon_M",

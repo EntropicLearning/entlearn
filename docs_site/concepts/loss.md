@@ -30,7 +30,7 @@ L_{\mathrm{coupling}}^{(n)}=-\delta_n\sum_{t=1}^{T}w_t
 \Gamma_{tk}^{(n)}\Gamma_{tk'}^{(n-1)}\log\Theta^{(n)}[k,k'].
 $$
 
-A source–target cluster pair has cost $-\log\Theta^{(n)}[k,k']$, weighted by the observation's affiliations to both clusters, larger transition entries give lower costs.
+A source–target cluster pair has cost $-\log\Theta^{(n)}[k,k']$, weighted by the observation's affiliations to both clusters. Larger transition entries give lower costs.
 The term is non-negative and linear in either affiliation matrix when the other is fixed. The connection's `delta` sets $\delta_n$.
 
 ??? note "Transition prior"
@@ -41,7 +41,7 @@ The term is non-negative and linear in either affiliation matrix when the other 
     \qquad a_n=\frac{\theta_\alpha-1}{K_n^{\mathrm{initial}}K_{n-1}^{\mathrm{initial}}}.
     $$
 
-    The denominator uses cluster counts at the start of the fit, so pruning leaves the per-entry coefficient unchanged. This prior corresponds to the [pseudocount in the transition update](learning.md#transition-updates). The default `theta_alpha=1` gives $a_n=0$.
+    The denominator uses the cluster counts that the blocks are created with, so pruning leaves the per-entry coefficient unchanged. This prior corresponds to the [pseudocount in the transition update](learning.md#transition-updates). The default `theta_alpha=1` gives $a_n=0$.
 
 ## Output term
 
@@ -78,7 +78,7 @@ Three weightings act on different parts of the objective:
 | Weighting | Role | Normalisation |
 | --- | --- | --- |
 | $W_T$ | Input term | Sums to one, starts at $w$, learned only with finite `epsilon_T` |
-| $w$ | Coupling terms and affiliation entropy | Supplied sample weights normalised to sum to one, uniform $1/T$ by default |
+| $w$ | Coupling terms, affiliation entropy, and the prior of the instance-weight penalty | Supplied sample weights normalised to sum to one, uniform $1/T$ by default |
 | $Q$ for classification, $\omega$ for regression | Output term | Total weight is the labelled share $f$ of the sample weights |
 
 Let $\mathcal L$ be the labelled observations and $f=\sum_{t\in\mathcal L}w_t$.
@@ -115,21 +115,31 @@ A positive-weight labelled mass is required.
 
 These normalisations prevent the data terms from scaling directly with the number of observations. Strengths and temperatures require no adjustment solely to compensate for a change in sample count.
 
-## Entropy rewards
+## Entropy penalties
 
-Affiliations and learned weight vectors receive entropy rewards (negative entropy penalty).
+Affiliations and learned weight vectors receive negative-entropy penalties, which are smallest for spread-out distributions.
 For $H(p)=-\sum_i p_i\log p_i$, their contributions are
 
 $$
 -\sum_{n=0}^{N}\varepsilon_n\sum_t w_t H(\gamma_t^{(n)}),
-\qquad -\varepsilon_DH(W_D),\qquad -\varepsilon_TH(W_T),\qquad -\varepsilon_MH(W_M).
+\qquad -\varepsilon_DH(W_D),\qquad -\varepsilon_T\Big[H(W_T)+\sum_tW_T[t]\log(Tw_t)\Big],\qquad -\varepsilon_MH(W_M).
 $$
 
 Affiliation entropy is weighted per observation.
 With uniform sample weights its contribution for block $n$ is $-\varepsilon_n T^{-1}\sum_tH(\gamma_t^{(n)})$.
-Each weight vector is one distribution, so its entropy reward has no per-observation weighting.
+Each weight vector is one distribution, so its entropy penalty has no per-observation weighting.
 
-A higher temperature increases the relative reward for spreading a distribution.
+The instance-weight penalty measures $W_T$ against the sample weights.
+In the bracket above, $\sum_tW_T[t]\log(Tw_t)$ is the expectation of $\log(Tw_t)$ under $W_T$, so the penalty is lower when $W_T$ puts its mass on observations with large sample weights.
+The penalty equals
+
+$$
+\varepsilon_T\sum_tW_T[t]\log\frac{W_T[t]}{w_t}-\varepsilon_T\log T,
+$$
+
+which is $\varepsilon_T$ times the relative entropy of $W_T$ from $w$, minus the constant $\varepsilon_T\log T$. It is therefore smallest when $W_T=w$. With uniform sample weights $\log(Tw_t)=0$, and the penalty is $-\varepsilon_TH(W_T)$.
+
+A higher temperature gives these penalties more weight against the data terms, which pulls each distribution towards uniform, or $W_T$ towards $w$.
 [Learning the model](learning.md#temperatures-and-effective-dimension) describes hard, soft and fixed regimes.
 
 !!! note "Missing labels and output-weight temperature"
@@ -146,20 +156,11 @@ $$
 \begin{aligned}
 L={}&L_{\mathrm{input}}+\sum_{n=1}^{N}L_{\mathrm{coupling}}^{(n)}+L_{\mathrm{out}}\\
 &-\sum_{n=0}^{N}\varepsilon_n\sum_t w_tH(\gamma_t^{(n)})
--\varepsilon_DH(W_D)-\varepsilon_TH(W_T)-\varepsilon_MH(W_M).
+-\varepsilon_DH(W_D)-\varepsilon_T\Big[H(W_T)+\sum_tW_T[t]\log(Tw_t)\Big]-\varepsilon_MH(W_M).
 \end{aligned}
 $$
 
 Here $L_{\mathrm{out}}$ is the classification or regression term.
 Coupling terms include any active prior.
-Weight entropies appear only for learned weights, and temperatures treated as zero contribute no entropy term. For $N=0$, the coupling sum is empty.
-
-## Logarithms and zeros
-
-Logarithms are evaluated as $\log(\max(x,\epsilon))$, where $\epsilon=\texttt{torch.finfo(dtype).eps}$ is dtype machine precision.
-This keeps costs finite for zero probabilities while preserving the stored probabilities.
-Assignment costs and loss evaluation use the same flooring, and entropy uses the convention $0\log0=0$.
-
-Softmax subtracts the largest logit before exponentiation. The common shift cancels in normalisation and prevents overflow. A slice with a non-finite normaliser falls back to a uniform distribution.
 
 Continue with [Learning the model](learning.md) for the minimisers of this objective.

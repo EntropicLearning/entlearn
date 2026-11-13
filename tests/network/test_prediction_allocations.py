@@ -3,12 +3,16 @@
 import pytest
 import torch
 from _alloc import assert_zero_alloc
+from conftest import FIXED_BUDGET, RANK_DEFICIENT
 from network._fixtures import prediction_model, prediction_refinement
 
 from entlearn import Coupling, PredictConfig
 
+pytestmark = FIXED_BUDGET
+
 
 class TestPredictionCoordinateAllocations:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("kind", ["mixed", "manifold"])
     @pytest.mark.parametrize("epsilon", [0.0, 0.1])

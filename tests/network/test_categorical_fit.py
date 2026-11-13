@@ -2,10 +2,11 @@
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE, by_depth
+from conftest import DEVICE, DTYPE, FIXED_BUDGET, by_depth
 from network._fixtures import assert_simplex_rows, classification_recipe, materialise
 
 from entlearn import ClassificationHead, Coupling, Input, Network, Recipe
+from entlearn.primitives.normalise import _tiny
 
 
 class TestCategoricalFit:
@@ -50,7 +51,8 @@ class TestCategoricalFit:
         y = torch.tensor([0, 0, 1, 1, 1, 1], dtype=torch.int64)
         recipe = classification_recipe(Input(K=2, epsilon=0.05))
         network = Network.fit(recipe, X_cont, y, X_cat=X_cat, max_iter=5, seed=3)
-        query = (torch.tensor([0, 1, 0], dtype=torch.int64),)
+        # Code 2 is the largest fitted code.
+        query = (torch.tensor([0, 1, 2], dtype=torch.int64),)
 
         probabilities = network.predict(
             torch.empty(3, 0, dtype=torch.float64),
@@ -60,25 +62,36 @@ class TestCategoricalFit:
         assert probabilities.shape == (3, 2)
         assert_simplex_rows(probabilities)
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize(
-        "query",
+        "query,message",
         (
-            pytest.param(torch.tensor([0, 3], dtype=torch.int64), id="code-out-of-range"),
-            pytest.param(torch.ones(2, 2, dtype=torch.float64) / 2, id="wrong-distribution-width"),
+            pytest.param(
+                torch.tensor([0, 3], dtype=torch.int64),
+                r"X_cat\[0\] holds code 3",
+                id="code-out-of-range",
+            ),
+            pytest.param(
+                torch.ones(2, 2, dtype=torch.float64) / 2,
+                r"\(T, M_i\) computation-dtype",
+                id="wrong-distribution-width",
+            ),
         ),
     )
     def test_prediction_rejects_categorical_features_outside_the_fitted_cardinality(
         self,
         query: torch.Tensor,
+        message: str,
     ) -> None:
         X_cont = torch.empty(6, 0, dtype=torch.float64)
         X_cat = (torch.tensor([0, 0, 1, 1, 2, 2], dtype=torch.int64),)
         y = torch.tensor([0, 0, 1, 1, 1, 1], dtype=torch.int64)
         network = Network.fit(classification_recipe(), X_cont, y, X_cat=X_cat, max_iter=1)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             network.predict(torch.empty(2, 0, dtype=torch.float64), X_cat=(query,))
 
+    @FIXED_BUDGET
     def test_initial_state_preserves_categorical_width_when_fit_rows_omit_a_level(self) -> None:
         recipe = classification_recipe()
         initial_state = Network.initialise(
@@ -127,8 +140,10 @@ def _noisy_categorical_data(
     return X_cont.clamp_(0.0, 1.0).to(DEVICE), X_cat, y.to(DEVICE)
 
 
+# delta_cat = 1 prices the 0/1-scaled continuous features against the categorical ones as
+# the fixture's informative-feature ranking assumes.
 _LEARNED_WEIGHTS = Recipe.chain(
-    Input(K=3, epsilon=0.015, epsilon_D=0.01, epsilon_T=0.15),
+    Input(K=3, epsilon=0.015, epsilon_D=0.01, epsilon_T=0.15, delta_cat=1.0),
     ClassificationHead(Coupling.M),
 )
 
@@ -182,9 +197,99 @@ class TestCategoricalStart:
         # A one-hot categorical start would leave all the instance weight on the three
         # seed rows and the feature weights uniform.
         weights = network.inspect("training_instance_weights")["input"]
-        effective_rows = torch.exp(
-            -(weights * weights.clamp_min(torch.finfo(DTYPE).tiny).log()).sum()
-        )
+        effective_rows = torch.exp(-(weights * weights.clamp_min(_tiny(DTYPE)).log()).sum())
         assert float(effective_rows) > 20
         feature_weights = network.inspect("feature_weights")["input"]
         assert set(feature_weights.topk(4).indices.tolist()) == {0, 1, 2, 3}
+
+
+def _delta_cat(network: Network) -> float | None:
+    block = network.recipe.blocks[0]
+    assert isinstance(block, Input)
+    return block.delta_cat
+
+
+@FIXED_BUDGET
+class TestDeltaCatDefault:
+    def test_an_omitted_value_is_the_helper_guess_on_the_weighted_training_rows(self) -> None:
+        from entlearn.helpers import delta_cat_guess
+
+        X_cont, X_cat, y = _noisy_categorical_data(noise_features=2)
+        weights = torch.linspace(1.0, 3.0, 40, dtype=DTYPE, device=DEVICE)
+
+        network = Network.fit(
+            classification_recipe(Input(K=3)),
+            X_cont,
+            y,
+            X_cat=X_cat,
+            sample_weights=weights,
+            max_iter=1,
+        )
+
+        expected = delta_cat_guess(
+            X_cont.cpu().numpy(),
+            [feature.cpu().numpy() for feature in X_cat],
+            sample_weights=weights.cpu().numpy(),
+        )
+        # Both compute in the data dtype from the same values.
+        assert _delta_cat(network) == pytest.approx(expected, rel=16 * torch.finfo(DTYPE).eps)
+        unweighted = Network.fit(
+            classification_recipe(Input(K=3)), X_cont, y, X_cat=X_cat, max_iter=1
+        )
+        assert _delta_cat(unweighted) != pytest.approx(expected, rel=1e-3)
+
+    def test_level_distributions_give_the_guess_of_their_codes(self) -> None:
+        X_cont, X_cat, y = _noisy_categorical_data(noise_features=2)
+        distributions = tuple(torch.nn.functional.one_hot(feature).to(DTYPE) for feature in X_cat)
+        recipe = classification_recipe(Input(K=3))
+
+        hard = Network.fit(recipe, X_cont, y, X_cat=X_cat, max_iter=1)
+        soft = Network.fit(recipe, X_cont, y, X_cat=distributions, max_iter=1)
+
+        assert _delta_cat(soft) == pytest.approx(_delta_cat(hard), rel=16 * torch.finfo(DTYPE).eps)
+
+    @pytest.mark.parametrize(
+        ("delta_cat", "constant", "expected"),
+        [
+            pytest.param(0.5, False, 0.5, id="supplied"),
+            pytest.param(None, True, 1.0, id="no-varying-continuous-feature"),
+        ],
+    )
+    def test_a_supplied_or_undefined_value_is_not_guessed(
+        self, delta_cat: float | None, constant: bool, expected: float
+    ) -> None:
+        X_cont, X_cat, y = _noisy_categorical_data(noise_features=0)
+        if constant:
+            X_cont = torch.full_like(X_cont, 0.5)
+
+        network = Network.fit(
+            classification_recipe(Input(K=3, delta_cat=delta_cat)),
+            X_cont,
+            y,
+            X_cat=X_cat,
+            max_iter=1,
+        )
+
+        assert _delta_cat(network) == expected
+
+    def test_continuous_only_data_leave_it_omitted(self) -> None:
+        X_cont, _, y = _noisy_categorical_data(noise_features=0)
+        recipe = classification_recipe(Input(K=3))
+
+        assert Network.fit(recipe, X_cont, y, max_iter=1).recipe == recipe
+
+    def test_fine_tuning_to_an_omitted_value_guesses_it_from_the_new_rows(self) -> None:
+        X_cont, X_cat, y = _noisy_categorical_data(noise_features=2)
+        recipe = classification_recipe(Input(K=3, delta_cat=0.5))
+        source = Network.fit(recipe, X_cont, y, X_cat=X_cat, max_iter=1)
+        guessed = Network.fit(classification_recipe(Input(K=3)), X_cont, y, X_cat=X_cat, max_iter=1)
+
+        tuned = source.fine_tune(
+            X_cont,
+            y,
+            X_cat=X_cat,
+            recipe=recipe.replace_block("input", delta_cat=None),
+            max_iter=1,
+        )
+
+        assert _delta_cat(tuned) == _delta_cat(guessed) != 0.5

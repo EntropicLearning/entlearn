@@ -106,12 +106,61 @@ def _regression_view(was_1d: bool, response: np.ndarray) -> _FrozenRegressorPred
     return _FrozenRegressorPredictions(response[:, 0] if was_1d else response)
 
 
+type _Metric = Callable[[np.ndarray, np.ndarray, np.ndarray | None], float | None]
+
+
+def _log_loss(
+    codes: np.ndarray, response: np.ndarray, rows: np.ndarray, weights: np.ndarray | None
+) -> float | None:
+    """Return scikit-learn's log loss -Σₜ wₜ log pₜ / Σₜ wₜ, pₜ the row's clipped class probability.
+
+    ``None`` leaves rows that lack one of the classes to scikit-learn, which refuses them.
+    """
+    labels = codes[rows]
+    if np.bincount(labels, minlength=response.shape[1]).min() == 0:
+        return None
+    if response.shape[1] == 2:
+        # Scikit-learn reads only the positive column p of a binary response, and adds 1 - p.
+        response = np.concatenate((1 - response[:, 1:], response[:, 1:]), axis=1)
+    eps = np.finfo(response.dtype).eps  # noqa: TID251 - scikit-learn's own clip
+    chosen = np.clip(response[np.arange(labels.shape[0]), labels], eps, 1 - eps)
+    return float(np.average(-np.log(chosen), weights=weights))
+
+
+def _accuracy(
+    codes: np.ndarray, response: np.ndarray, rows: np.ndarray, weights: np.ndarray | None
+) -> float:
+    """Return minus scikit-learn's accuracy of the cached probabilities' first maxima."""
+    return -float(np.average(codes[rows] == response.argmax(axis=1), weights=weights))
+
+
+def _r2(
+    target: np.ndarray, response: np.ndarray, rows: np.ndarray, weights: np.ndarray | None
+) -> float | None:
+    """Return minus scikit-learn's R², the output mean of 1 - Σₜ wₜ(yₜ - ŷₜ)² / Σₜ wₜ(yₜ - ȳ)².
+
+    ``None`` leaves fewer than two rows and a constant target to scikit-learn.
+    """
+    if rows.shape[0] < 2:
+        return None
+    truth = target[rows].reshape(rows.shape[0], -1)
+    weight = 1.0 if weights is None else weights[:, None]
+    numerator = np.sum(weight * (truth - response) ** 2, axis=0)
+    denominator = np.sum(weight * (truth - np.average(truth, axis=0, weights=weights)) ** 2, axis=0)
+    if not denominator.all():
+        return None
+    return -float(np.average(1 - numerator / denominator))
+
+
 @dataclass(frozen=True)
 class _ScorerSelectionLoss:
     """Translate cached tensor predictions into a smaller-is-better scorer result.
 
     ``labelled`` marks the rows a scorer sees, and ``truth`` is read only on those
     rows. ``view`` wraps one cached response as the estimator the scorer calls.
+    ``named`` marks a scorer given by name: it passes ``X`` only to the ``view``, which
+    ignores it, so it receives ``X`` unsliced.
+    ``metric`` computes a named scorer's result itself, or returns ``None`` to call it.
     """
 
     scorer: Callable[..., float]
@@ -119,6 +168,8 @@ class _ScorerSelectionLoss:
     truth: np.ndarray
     labelled: np.ndarray
     view: Callable[[np.ndarray], BaseEstimator]
+    named: bool
+    metric: _Metric | None
 
     def __call__(
         self,
@@ -133,9 +184,15 @@ class _ScorerSelectionLoss:
     ) -> float:
         del target, class_weights, task_weights
         rows = _scoring_rows(self.labelled, fold, partition)
-        view = self.view(prediction.detach().cpu().numpy())
+        response = prediction.detach().cpu().numpy()
+        if self.metric is not None:
+            weights = None if sample_weights is None else sample_weights.detach().cpu().numpy()
+            loss = self.metric(response, rows, weights)
+            if loss is not None:
+                return loss
+        X = self.X if self.named else _safe_indexing(self.X, rows)
         return _score_cached_response(
-            self.scorer, view, _safe_indexing(self.X, rows), self.truth[rows], sample_weights
+            self.scorer, self.view(response), X, self.truth[rows], sample_weights
         )
 
 
@@ -151,12 +208,17 @@ def _classification_selection_loss(
     """Build a classification scorer callback."""
     if not _scorer_selection_requested(n_inits, cv, scoring):
         return None
+    name = "accuracy" if scoring is None else scoring
+    named = isinstance(name, str)
+    metric = {"neg_log_loss": _log_loss, "accuracy": _accuracy}.get(name) if named else None
     return _ScorerSelectionLoss(
-        get_scorer("accuracy" if scoring is None else scoring),
+        get_scorer(name),
         X,
         classes[codes],
         codes != -1,
         partial(_FrozenClassifierPredictions, classes=classes),
+        named=named,
+        metric=None if metric is None else partial(metric, codes),
     )
 
 
@@ -173,12 +235,15 @@ def _regression_selection_loss(
     if not _scorer_selection_requested(n_inits, cv, scoring):
         return None
     labelled = ~np.isnan(target) if was_1d else ~np.isnan(target).all(axis=1)
+    name = "r2" if scoring is None else scoring
     return _ScorerSelectionLoss(
-        get_scorer("r2" if scoring is None else scoring),
+        get_scorer(name),
         X,
         target,
         labelled,
         partial(_regression_view, was_1d),
+        named=isinstance(name, str),
+        metric=partial(_r2, target) if name == "r2" else None,
     )
 
 

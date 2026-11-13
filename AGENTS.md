@@ -30,7 +30,7 @@ src/entlearn/
   scikit_adapter/  EONClassifier and EONRegressor
   plotting/        optional Plotly figures; Network.plot builds on them
 tests/             mirrors src/; conftest.py selects the device and dtype
-scripts/           checks of the package boundary and the doc site, run when needed
+scripts/           documentation build tools and on-demand package and doc-site checks
 examples/          marimo notebooks: the tutorial series
 docs_site/         the MkDocs site
 ```
@@ -39,11 +39,11 @@ docs_site/         the MkDocs site
 
 - **Exact block-coordinate descent.** Every update step sets one group of parameters to the
   exact minimiser of the loss with the rest fixed, so there is no learning rate and the loss
-  never increases within an iteration
-  ([why](docs_site/concepts/loss.md#why-the-loss-never-increases)). A new update step is exact
-  too. `tests/network/test_monotonicity.py` checks every step, and pytest turns a
-  `LossIncreaseWarning` into an error, so a failure there points at the update, with the
-  tolerance left as it is.
+  never increases within an iteration ([why](docs_site/concepts/index.md#one-iteration)).
+  Entropy is exact (`torch.special.entr`), so each softmax is the true minimiser of its
+  step. A new update step is exact too. `tests/network/test_monotonicity.py` checks every
+  step, and pytest turns a `LossIncreaseWarning` into an error, so a failure there points at
+  the update, with the tolerance left as it is.
 - **Description apart from runtime.** An immutable `Recipe` describes the model and holds no
   tensors; `Network.fit` compiles it into the runtime blocks that hold the fitted state. A
   search replaces descriptions (`replace_block`, `replace_connection`, `set_params`) and
@@ -63,19 +63,24 @@ docs_site/         the MkDocs site
   table), so each block and its incoming state are compacted together when a cluster is
   pruned (`_CompiledGraph.prune_` in `network/session.py`).
 - **Pruning is the one empty-cluster policy.** A cluster whose unweighted affiliation mass is
-  at most machine epsilon is removed; this is the case in which removing it leaves the loss
-  unchanged ([Empty clusters](docs_site/concepts/affiliations.md#empty-clusters)).
-- **One precision floor.** `_eps(dtype)` in `primitives/normalise.py` is the safe-log floor,
-  the hard-or-soft temperature gate, the empty-cluster threshold and the relative-change
-  guard, so the loss the solver minimises is the loss the monitor reports. The gate compares
-  a temperature setting such as `epsilon` with it, never a per-row temperature such as
-  `epsilon / T`, so no regime depends on the number of rows. A clamp that only turns `0/0`
-  into `0` and must leave every positive value alone uses `torch.finfo(dtype).tiny` instead:
-  the covariance rescaling in `primitives/manifold.py` and the plotting helpers.
+  at or below `_tiny(dtype)` is removed ([Pruning](docs_site/concepts/learning.md#pruning)).
+- **Three numerical thresholds**, each with one role and a helper in `primitives/normalise.py`:
+  - Zero selects a setting. `_is_soft(temp)` is `temp > 0` in every dtype, and a zero weight
+    removes its term.
+  - `_tiny(dtype)` marks a computed value as numerically zero. It is the empty-mass threshold,
+    the floor of `floored_log_` for every probability logarithm, and the clamp on a divisor.
+  - `_eps(dtype)` compares a quantity with another on the same scale: round-off tolerances,
+    the stopping and loss-increase tests, the relative manifold ridge and the noise floor on
+    the regression targets' spread in label-aware seeding.
+
+  A softmax subtracts the minimum cost before scaling through `_scale_ratio_`, and a value
+  that could overflow, such as the instance-weight log-normaliser, is kept as a shift and a
+  shifted part.
 - **Update steps allocate nothing.** Workspaces are built when the data is staged, and block
-  buffers are sized at the starting cluster count and read through `[:K]` views, which keeps
-  fits fast and reproducible run to run. `assert_zero_alloc` in `tests/_alloc.py` checks it.
-  Staging, initialisation, workspace construction and pruning allocate.
+  buffers are sized at the starting cluster count and read through contiguous views of the
+  active count (`_scratch_view`), which keeps fits fast and reproducible run to run.
+  `assert_zero_alloc` in `tests/_alloc.py` checks it. Staging, initialisation, workspace
+  construction and pruning allocate.
 - **Inference mode throughout.** Every public `Network` entry point runs under
   `torch.inference_mode()`, so every fitted tensor is an inference tensor, and code that
   writes into one (resuming, fine-tuning, loading) wraps the write in inference mode too.
@@ -84,8 +89,9 @@ docs_site/         the MkDocs site
   and label codes themselves; the estimators do it for tabular data.
 - **Checks raise, from one owner.** `python -O` strips `assert`, so a correctness check raises
   `ValueError` for a bad public input and `RuntimeError` for a broken invariant, and `assert`
-  serves type narrowing. Each check lives in one function that every path calls, which keeps
-  the rules from drifting apart.
+  serves type narrowing. A valid input that cannot be honoured in full, or that another option
+  overrides, warns instead and says what was done. Each check lives in one function that every
+  path calls, which keeps the rules from drifting apart.
 - **One saved representation.** The snapshot in `network/persistence/snapshot.py` serves the
   `.safetensors` file, pickling and process-worker transport, so every route runs the same
   validation.
@@ -100,6 +106,7 @@ docs_site/         the MkDocs site
 
 ```bash
 uv sync --all-extras                # development and documentation groups included
+scripts/gate                        # every check below except the docs build; run before a PR
 uv run pytest                       # the suite; EON_TEST_* variables select the lane
 uv run ruff check . && uv run ruff format --check . && uv run ty check
 uv run poe docs-build               # strict MkDocs build; `uv run poe docs` previews
@@ -111,5 +118,6 @@ uv run pytest scripts/test_release_docs.py
   lists the lane variables.
 - Continuous feature data in the tests stays in or near `[0, 1]`, the regime the fixtures and
   tolerances assume.
-- The `scripts/` checks run on demand: [scripts/README.md](scripts/README.md) says which one
-  checks what.
+- The `scripts/` checks stay out of CI and run in `scripts/gate`:
+  [scripts/README.md](scripts/README.md) says which one checks what.
+- `git config core.hooksPath scripts/hooks` installs a pre-commit hook that runs Ruff.

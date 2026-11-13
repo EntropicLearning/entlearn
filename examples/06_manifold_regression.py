@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "entlearn[plotting,rich,sklearn]",
+#     "marimo",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.24.0"

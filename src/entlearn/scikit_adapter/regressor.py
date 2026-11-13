@@ -37,20 +37,13 @@ def _prepare_regression_y(y: object, dtype: torch.dtype) -> tuple[np.ndarray, bo
         force_writeable=True,
     )
     was_1d = arr.ndim == 1
-    nan_mask = np.isnan(arr)
-    if was_1d:
-        labelled = ~nan_mask
-    else:
-        row_any_nan = nan_mask.any(axis=1)
-        row_all_nan = nan_mask.all(axis=1)
-        if (row_any_nan & ~row_all_nan).any():
+    if not was_1d:
+        nan_mask = np.isnan(arr)
+        if (nan_mask.any(axis=1) & ~nan_mask.all(axis=1)).any():
             raise ValueError(
                 "y has partially-NaN row(s): a regression target row must be either fully "
                 "observed or fully NaN"
             )
-        labelled = ~row_all_nan
-    if not labelled.any():
-        raise ValueError("y has no labelled instances; at least one labelled instance is required")
     return arr, was_1d
 
 

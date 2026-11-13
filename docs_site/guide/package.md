@@ -1,6 +1,6 @@
-# Package and Recipes 
+# Package and Recipes
 
-This page introduces the package interfaces and shows how to create Recipes.
+This page contains a description of the ideas behind the package and how to create Recipes.
 
 ## Recipes, Networks and estimators
 
@@ -13,7 +13,8 @@ There are two ways of creating a model:
 - The estimators `EONClassifier` and `EONRegressor` are higher level objects that are compliant with the scikit-learn interface.
 
 ## How an estimator relates to a Network
-An estimator wraps a `Network`, available as `network_` after fitting.
+An estimator internally wraps a `Network`.
+In fact, from a fitted estimator it is possible to obtain the internal network using its `network_` attribute.
 
 The main difference is the inclusion of extra utilities and convenience functions.
 A `Network` is bare-bones and allows a higher level of control, whereas an estimator is more user-friendly.
@@ -21,18 +22,17 @@ A `Network` is bare-bones and allows a higher level of control, whereas an estim
 In fact, a `Network` operates directly on tensors, so you are responsible for moving the data to the correct device, keeping track of the named columns, handling the class labels and so on (see [Using Networks](networks.md)).
 On the other hand, if you _just want to fit a model_ instead, an estimator will take care of this for you.
 
-An estimator is not a second implementation of the model.
-It converts NumPy arrays or DataFrames, records the column meanings and encodes the categories, then leaves the fitting, the prediction and every calculation on the fitted model to its `Network`.
+An estimator converts NumPy arrays or DataFrames, records the column meanings and encodes the categories, then leaves the fitting, the prediction and every calculation on the fitted model to its `Network`.
 Its results are converted back to the original labels and columns.
 
 When should you use a `Network` directly? Start with an estimator, and use a `Network` when you need:
 
-- to fit or predict with tensors that are already on the right device;
-- the affiliations of each block, or the predictions of each retained member;
-- direct continuation, fine-tuning, retention controls or the `.safetensors` format (see [Using Networks](networks.md#save-the-network));
+- to fit or predict with tensors that are already on the right device
+- the affiliations of each block, or the predictions of each retained member
+- direct continuation, fine-tuning, retention controls or the `.safetensors` format (see [Using Networks](networks.md#save-the-network))
 - a custom initial state, or a control the estimator does not expose.
 
-For routine inspection, prefer the estimator's own methods: going through `network_` to repeat one of them loses the column and label mappings.
+For inspection of an estimator, prefer its own methods.
 
 ## What is needed to define a model?
 
@@ -101,7 +101,7 @@ Since fitting never changes a `Recipe`, the same recipe can be reused, cloned an
 Parameters such as the number of clusters ($K$) and the temperatures belong to the `Recipe`. Training settings, such as the maximum number of iterations, are instead passed when fitting a model.
 
 
-New `Recipe` objects can be obtained from existing ones, as illustrated below: 
+New `Recipe` objects can be obtained from existing ones, as illustrated below:
 
 ```python
 # Using the recipe created in the previous example

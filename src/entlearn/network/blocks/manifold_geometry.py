@@ -7,47 +7,9 @@ from dataclasses import dataclass
 import torch
 
 from entlearn._warnings import _warn
-from entlearn.primitives.manifold import assemble_metrised_cost_, weighted_subspace_
+from entlearn.primitives.distance import weighted_sq_norm_
+from entlearn.primitives.manifold import assemble_metrised_cost_
 from entlearn.primitives.normalise import _eps
-
-
-@dataclass
-class _SubspaceWorkspace:
-    """Scratch for the fixed orientation of one weighted subspace calculation."""
-
-    buffers: dict[str, torch.Tensor]
-
-    @classmethod
-    def allocate(cls, X: torch.Tensor, d: int) -> _SubspaceWorkspace:
-        """Allocate only the buffers used by the covariance or SVD orientation."""
-        T, D = X.shape
-        dtype, device = X.dtype, X.device
-        buffers = {
-            "sqrtw_buf": torch.empty(T, dtype=dtype, device=device),  # (T,) √w_t
-            "centred_buf": torch.empty(T, D, dtype=dtype, device=device),  # M_t = √w_t(x_t-C_k)
-        }
-        if D <= T:
-            buffers.update(
-                wsum_buf=torch.empty(1, dtype=dtype, device=device),  # (1,) Σ_t w_t
-                cov_buf=torch.empty(D, D, dtype=dtype, device=device),  # MᵀM / Σ_t w_t
-                evals_buf=torch.empty(D, dtype=dtype, device=device),  # Covariance eigenvalues
-                evecs_buf=torch.empty(D, D, dtype=dtype, device=device),  # Eigenvectors as columns
-                revidx=torch.arange(D - 1, D - 1 - d, -1, device=X.device),  # Leading d, descending
-            )
-        else:
-            # M = U diag(S) Vᵀ. For d > T, complete Vᵀ to a full D-dimensional basis.
-            buffers.update(
-                svd_U=torch.empty(T, T, dtype=dtype, device=device),  # Left singular vectors
-                svd_S=torch.empty(T, dtype=dtype, device=device),  # Singular values
-                svd_Vh=torch.empty(D if d > T else T, D, dtype=dtype, device=device),  # Vᵀ
-            )
-        return cls(buffers)
-
-    def write_(
-        self, X: torch.Tensor, centre: torch.Tensor, weights: torch.Tensor, out: torch.Tensor
-    ) -> None:
-        """Write the leading weighted subspace about the supplied centre."""
-        weighted_subspace_(X, centre, weights, out.shape[1], out=out, **self.buffers)
 
 
 def _complete_initial_basis(supported: torch.Tensor, d: int) -> torch.Tensor:
@@ -58,14 +20,13 @@ def _complete_initial_basis(supported: torch.Tensor, d: int) -> torch.Tensor:
     If ‖v‖ is above the dimension-scaled precision floor, append q = v / ‖v‖.
     The resulting columns satisfy QᵀQ ≈ I.
     """
-    vectors = []
-    for column in supported.unbind(dim=1):
-        vector = column.clone()
-        if vector[vector.abs().argmax()] < 0:
-            vector.neg_()
-        vectors.append(vector)
-    if len(vectors) >= d:
-        return torch.stack(vectors[:d], dim=1)
+    # Sign each leading direction so that its largest-magnitude entry is positive.
+    leading = supported[:, :d]
+    pivots = leading.gather(0, leading.abs().argmax(dim=0, keepdim=True))
+    leading = torch.where(pivots < 0, -leading, leading)
+    if leading.shape[1] == d:
+        return leading
+    vectors = list(leading.t().contiguous())
     features = supported.shape[0]
     # Unit coordinate vectors and a D-term projection give a D·ε precision scale.
     tolerance = features * _eps(supported.dtype)
@@ -95,10 +56,12 @@ def seed_projectors(X: torch.Tensor, centroids: torch.Tensor, d: int) -> torch.T
     """
     projectors = torch.empty(centroids.shape[0], X.shape[1], d, dtype=X.dtype, device=X.device)
     nearest = torch.cdist(X, centroids).argmin(dim=1)
+    # One stable sort lists every cluster's member rows in their original order.
+    counts = torch.bincount(nearest, minlength=centroids.shape[0]).tolist()
+    members = torch.argsort(nearest, stable=True).split(counts)
     deficient = []
-    for index, centre in enumerate(centroids):
-        members = nearest == index
-        centred = X[members] - centre
+    for index, (centre, rows) in enumerate(zip(centroids, members, strict=True)):
+        centred = X.index_select(0, rows) - centre
         if centred.shape[0]:
             # Use one thin SVD for both rank and directions.
             _, singular_values, right = torch.linalg.svd(
@@ -140,8 +103,10 @@ class _ManifoldDistance:
         """Allocate the fused distance buffers for the operation's initial cluster count."""
         T, D = X.shape
         dtype, device = X.dtype, X.device
+        X_sq_sum = torch.empty(T, dtype=dtype, device=device)
+        weighted_sq_norm_(X_sq_sum, X)
         return cls(
-            X_sq_sum=X.square().sum(dim=1),
+            X_sq_sum=X_sq_sum,
             RHS=torch.empty(D, K * (1 + d), dtype=dtype, device=device),
             combo=torch.empty(T, K * (1 + d), dtype=dtype, device=device),
             proj_sq=torch.empty(T, K, dtype=dtype, device=device),

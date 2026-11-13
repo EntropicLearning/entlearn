@@ -7,7 +7,7 @@ missing-target rules and original-space reconstruction.
 
 [Refit and reuse](../guide/estimators.md#refit-and-reuse) describes the `warm_start` modes that
 continue a fit, and how `clone` copies an estimator's parameters without its fitted network.
-[Save the entire estimator](../guide/estimators.md#saving-an-estimator) shows how pickle and
+[Saving an estimator](../guide/estimators.md#saving-an-estimator) shows how pickle and
 joblib keep a fitted estimator, including its ability to resume.
 
 ::: entlearn.scikit_adapter.EONClassifier

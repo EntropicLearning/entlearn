@@ -42,14 +42,17 @@ def _number(value: float) -> str:
     return f"{value:.6g}"
 
 
-def _parameters(block: Block, *, categorical: bool) -> str:
+def _parameters(block: Block, *, categorical: bool, epsilon_ratio: float | None = None) -> str:
     """Select the applicable training controls, including temperature defaults."""
     parameters = []
     if isinstance(block, (Input, ManifoldInput, Hidden)):
-        parameters.append(f"ε={_number(block.epsilon)}")
+        assert block.epsilon is not None
+        ratio = "" if epsilon_ratio is None else f" ({_number(epsilon_ratio)}·δ)"
+        parameters.append(f"ε={_number(block.epsilon)}{ratio}")
     if isinstance(block, Input):
         parameters.append(f"ε_D={_number(block.epsilon_D)} · ε_T={_number(block.epsilon_T)}")
         if categorical:
+            assert block.delta_cat is not None  # fitting fills it when there are categories
             parameters.append(f"δ_cat={_number(block.delta_cat)}")
     elif isinstance(block, ManifoldInput):
         parameters.extend(
@@ -68,8 +71,11 @@ def _parameters(block: Block, *, categorical: bool) -> str:
     return "\n".join(parameters)
 
 
-def _incoming(connection: Connection) -> str:
-    settings = [f"δ={_number(connection.delta)}"]
+def _incoming(connection: Connection, *, delta_ratio: float | None = None) -> str:
+    """Describe a connection that carries its resolved ``delta``, and the ratio that gave it."""
+    assert connection.delta is not None
+    ratio = "" if delta_ratio is None else f" ({_number(delta_ratio)}·previous δ)"
+    settings = [f"δ={_number(connection.delta)}{ratio}"]
     if connection.coupling is not None:
         settings.insert(0, connection.coupling.value)
     if connection.theta_alpha is not None:
@@ -153,9 +159,13 @@ def render_network(network: Network, *, width: int) -> Panel:
     else:
         blocks.add_column("Configuration", ratio=2, overflow="fold")
     descriptions = {block.name: block for block in network.recipe.blocks}
+    explicit = network.recipe.resolve_ratios()
+    resolved = {block.name: block for block in explicit.blocks}
     incoming: dict[str, list[str]] = {}
-    for connection in network.recipe.connections:
-        incoming.setdefault(connection.target, []).append(_incoming(connection))
+    for connection, given in zip(explicit.connections, network.recipe.connections, strict=True):
+        incoming.setdefault(connection.target, []).append(
+            _incoming(connection, delta_ratio=given.delta_ratio)
+        )
     for name, active in network.schema.K_active:
         block = descriptions[name]
         if isinstance(block, ClassificationHead):
@@ -164,7 +174,11 @@ def render_network(network: Network, *, width: int) -> Panel:
             size = f"{active} outputs"
         else:
             size = f"{block.K} → {active}"
-        parameters = _parameters(block, categorical=bool(network.schema.M_cat))
+        parameters = _parameters(
+            resolved[name],
+            categorical=bool(network.schema.M_cat),
+            epsilon_ratio=block.epsilon_ratio if isinstance(block, Hidden) else None,
+        )
         connection_text = "\n".join(incoming.get(name, [])) or "—"
         label = Text(f"{name}\n{type(block).__name__}", overflow="fold")
         if wide:

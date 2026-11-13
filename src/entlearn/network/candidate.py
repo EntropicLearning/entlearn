@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import replace
 from numbers import Integral
 
@@ -11,9 +12,8 @@ import torch
 from entlearn.network.build import _BuiltRecipe
 from entlearn.network.config import PredictConfig
 from entlearn.network.data import _StagedData, _training_subset
-from entlearn.network.finalise import finalise
+from entlearn.network.finalise import complete, finalise
 from entlearn.network.fit import _fit
-from entlearn.network.initialisation.geometry import _seed_initial_state
 from entlearn.network.initialisation.resolve_state import resolve_state
 from entlearn.network.state import InitialState, _FittedNetwork
 
@@ -53,19 +53,17 @@ def _fit_candidate(
     tol: float,
     logger: logging.Logger | None,
     verbose: int,
-    init_rows: torch.Tensor | None = None,
+    seeded: Mapping[int, InitialState],
     rows: torch.Tensor | None = None,
     provided: bool = False,
-) -> _FittedNetwork:
-    """Complete one independent fit and its prediction policy before selection.
+    training_prediction: bool = False,
+) -> tuple[_FittedNetwork, torch.Tensor | None]:
+    """Fit one independent candidate for selection, completed now if selection predicts with it.
 
     ``provided`` marks ``initial_state`` as the caller's own, fitted once without selection.
+    Otherwise, ``seeded[seed]`` supplies the state generated before candidate fitting.
     """
-    state = initial_state
-    if state is None:
-        state = _seed_initial_state(
-            built, data, allow_conversion=allow_conversion, seed=seed, rows=init_rows
-        )
+    state = seeded[seed] if initial_state is None else initial_state
     if rows is not None:
         data = _training_subset(built, data, rows)
     state, messages = resolve_state(
@@ -85,14 +83,19 @@ def _fit_candidate(
         logger=_fit_logger(logger, verbose),
         verbose=verbose,
     )
-    return finalise(
+    fitted = finalise(
         graph,
         data,
         replace(trajectory, warnings=messages + trajectory.warnings),
         predict_config,
         state,
-        # Selection scores a fold fit and discards it, so it needs no scoring reference.
-        scoring_reference=rows is None,
         max_iter=max_iter,
         tol=tol,
+    )
+    if rows is None and not training_prediction:
+        # Selection completes an unscored full-data fit only if it keeps it.
+        return fitted, None
+    # Selection scores a fold fit and discards it, so it needs no scoring reference.
+    return complete(
+        fitted, data, scoring_reference=rows is None, training_prediction=training_prediction
     )

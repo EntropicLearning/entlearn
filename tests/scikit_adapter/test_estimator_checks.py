@@ -15,7 +15,6 @@ from ._fixtures import fitted_protocol_estimator, protocol_estimator
 # applicability visible rather than marking numerical failures as expected.
 _INAPPLICABLE = {
     "check_sample_weight_equivalence_on_dense_data": "Entropy and random initialisation depend on row count, not only weighted mass.",
-    "check_estimators_pickle": "Fitted Network serialisation is not available; parameter-only cloning is tested.",
     "check_classifiers_classes": "The check uses -1 as a class; numeric -1 deliberately denotes unlabelled rows.",
     "check_array_api_input": "This is a NumPy/pandas adapter, not an Array API adapter.",
     "check_methods_sample_order_invariance": "Calls score_samples without instance-weight recovery. See TestDefaultQueryContracts; recovery-enabled invariance is covered in test_queries.py.",
@@ -25,8 +24,11 @@ _EXPECTED_FAILURES = {
     "check_classifiers_one_label_sample_weights": "zero sample weights are rejected",
 }
 
-_close = partial(np.testing.assert_allclose, atol=1e-7, rtol=1e-7)
-# Class labels must agree exactly; continuous predictions agree to rounding.
+# The protocol estimators compute in float64 with hard assignments, so another batch
+# only reorders sums: continuous predictions agree to a few units in the last place.
+_ROUNDING = 16 * np.finfo(np.float64).eps
+_close = partial(np.testing.assert_allclose, atol=_ROUNDING, rtol=_ROUNDING)
+# Class labels must agree exactly.
 _PREDICTIONS = {
     EONClassifier: {"predict": np.testing.assert_array_equal, "predict_proba": _close},
     EONRegressor: {"predict": _close},
@@ -43,7 +45,7 @@ def _checks():
             if name in _INAPPLICABLE:
                 continue
             reason = _EXPECTED_FAILURES.get(name)
-            marks = () if reason is None else pytest.mark.xfail(reason=reason, strict=True)
+            marks = [] if reason is None else [pytest.mark.xfail(reason=reason, strict=True)]
             yield pytest.param(
                 instance, check, id=f"{type(estimator).__name__}-{name}", marks=marks
             )

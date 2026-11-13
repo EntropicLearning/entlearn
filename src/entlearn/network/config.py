@@ -19,7 +19,7 @@ _DEFAULT_MAX_ITER = 100
 
 @dataclass(frozen=True)
 class PredictConfig:
-    """Complete prediction policy, never implicitly merged with another policy.
+    """Complete prediction policy, merged with another policy only for ``epsilon_P``.
 
     Attributes:
         predict_mode: ``"single"`` for a single forward pass or ``"iterative"`` for
@@ -27,11 +27,13 @@ class PredictConfig:
         output_mode: ``"geometric"`` or (M-only) ``"arithmetic"`` for classification.
             ``None`` selects geometric classification or ordinary regression.
         epsilon_P: Finite non-negative geometric output temperature. Omission at
-            fit calibrates it. Omission in a complete prediction override uses
-            ``epsilon_P = delta``, the head connection strength, because the
+            fit calibrates it. Omission in a prediction override keeps the fitted
+            temperature. A fitted arithmetic policy has none, so the override then
+            uses ``epsilon_P = delta``, the head connection strength, because the
             uncalibrated fallback is ``beta = delta / epsilon_P = 1``.
             Invalid for arithmetic or regression.
-        tol: Non-negative iterative tolerance, independent of a fit's controls.
+        tol: Non-negative stopping tolerance of iterative prediction, applied as a fit's
+            ``tol`` is, and independent of the fit's controls.
         max_iter: Positive iterative iteration limit, independent of a fit's controls.
     """
 

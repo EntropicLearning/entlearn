@@ -26,6 +26,7 @@ from entlearn import (
     ClassificationHead,
     Head,
     InitialState,
+    InputBlock,
     Network,
     PredictConfig,
     Recipe,
@@ -68,9 +69,10 @@ def _prepare_sample_weights(
     """Validate optional tabular row weights and stage them in the computation precision."""
     if sample_weight is None:
         return None
-    weights = _check_sample_weight(
-        sample_weight, X, dtype=_staging_dtype(dtype), allow_all_zero_weights=True
-    )
+    with np.errstate(over="ignore"):
+        weights = _check_sample_weight(
+            sample_weight, X, dtype=_staging_dtype(dtype), allow_all_zero_weights=True
+        )
     staged, _ = _stage_sample_weights(
         torch.as_tensor(weights, dtype=dtype, device=device),
         length=len(weights),
@@ -90,6 +92,49 @@ def _random_seed(random_state: object) -> int:
             raise ValueError("random_state must be an integer in [0, 2**63)")
         return seed
     return int(check_random_state(random_state).randint(0, _RANDOM_STATE_DRAW_HIGH))
+
+
+def _check_state_counts(
+    state: object,
+    recipe: Recipe,
+    layout: FeatureLayout,
+    classes: np.ndarray | None,
+) -> None:
+    """Require a state's level and head class counts to equal those of this fit.
+
+    Groups are matched by block name alone; the state holds counts, not levels or labels.
+    """
+    if type(state) is not InitialState:
+        return  # Network.fit refuses it with its own message.
+    geometry = state.input_geometry
+    source = next(block for block in recipe.blocks if isinstance(block, InputBlock))
+    if geometry is not None and geometry.input.name == source.name:
+        held = tuple(centroids.shape[1] for centroids in geometry.categorical_centroids)
+        seen = tuple(levels.shape[0] for levels in layout.categories)
+        # A different column count cannot be paired: the Network warns and regenerates.
+        if len(held) == len(seen) and held != seen:
+            raise ValueError(
+                f"categorical columns at positions {tuple(layout.categorical_indices)} hold "
+                f"{seen} level(s) in these rows, but initial_state holds {held}. The "
+                "estimator numbers a column's levels in sorted order over the rows it "
+                "fits, so these codes would map onto different levels of the state. Fit "
+                "rows that hold exactly the levels of the rows the state was generated from."
+            )
+    head = next(block for block in recipe.blocks if isinstance(block, Head))
+    group = next((g for g in state.parameters if g.description.name == head.name), None)
+    if (
+        classes is not None
+        and group is not None
+        and isinstance(group.description, ClassificationHead)
+        and group.description.n_classes != classes.shape[0]
+    ):
+        raise ValueError(
+            f"the labels hold {classes.shape[0]} class(es), but initial_state's "
+            f"classification head {head.name!r} holds {group.description.n_classes}. The "
+            "estimator numbers the classes in sorted order over the labels it fits, so these "
+            "labels would map onto different rows of the state's head. Fit labels that hold "
+            "exactly the classes of the rows the state was captured from."
+        )
 
 
 @dataclass(frozen=True)
@@ -141,6 +186,7 @@ class _BaseEON(BaseEstimator):
     dtype: torch.dtype | None
     verbose: int
     _fit_predict_config: PredictConfig | None
+    _fit_recipe: Recipe
 
     def get_params(self, deep: bool = True) -> dict[str, Any]:
         """Return constructor parameters and, when requested, every named Recipe field."""
@@ -181,7 +227,10 @@ class _BaseEON(BaseEstimator):
         A supplied ``initial_state`` is fitted directly, without initialisation selection:
         the estimator's ``cv`` splitter is not traversed and its ``scoring`` is not used,
         although an invalid ``scoring`` still raises. An enclosing search keeps its own
-        folds and scorer.
+        folds and scorer. With categorical columns, the fit raises unless each column
+        holds as many levels as the state's input geometry does, since the codes number
+        the levels of the rows fitted. When the state holds the classification head, the
+        fit raises unless the labels hold as many classes as the head, for the same reason.
 
         Args:
             X: Dense feature matrix or eager DataFrame, with instances in rows.
@@ -195,7 +244,9 @@ class _BaseEON(BaseEstimator):
             This fitted estimator.
 
         Raises:
-            ValueError: If the Recipe, data or controls are incompatible.
+            ValueError: If the Recipe, data or controls are incompatible, or a categorical
+                column's level count or the class count differs from the supplied
+                ``initial_state``'s.
         """
         if type(self.recipe) is not Recipe:
             raise ValueError("recipe must be a valid Recipe")
@@ -220,8 +271,12 @@ class _BaseEON(BaseEstimator):
                 sample_weights=sample_weights,
                 **staged.weights,
             )
-            self.network_ = network
+            self.network_, self._fit_recipe = network, self.recipe
             return self
+        layout = metadata["feature_layout_"]
+        assert isinstance(layout, FeatureLayout)
+        classes = staged.published.get("classes_")
+        _check_state_counts(self.initial_state, self.recipe, layout, classes)
         seed = _random_seed(self.random_state)
         pairs = _materialise_splits(
             self.cv if self.initial_state is None else None,
@@ -260,7 +315,11 @@ class _BaseEON(BaseEstimator):
         # Old optional feature names must disappear when a fresh fit uses an unnamed matrix.
         self.__dict__.pop("feature_names_in_", None)
         self.__dict__.update(
-            metadata, **staged.published, network_=network, _fit_predict_config=self.predict_config
+            metadata,
+            **staged.published,
+            network_=network,
+            _fit_predict_config=self.predict_config,
+            _fit_recipe=self.recipe,
         )
         return self
 
@@ -297,7 +356,8 @@ class _BaseEON(BaseEstimator):
                 "Continuing a fitted estimator requires n_inits=1. Set n_inits=1 to "
                 "continue its retained trajectories, or warm_start=False for a fresh fit with initialisation selection."
             )
-        if self.warm_start == "resume" and self.recipe != self.network_.recipe:
+        # The fitted Recipe holds a resolved delta_cat, so compare the requested one.
+        if self.warm_start == "resume" and self.recipe != self._fit_recipe:
             raise ValueError(
                 "The estimator Recipe has changed since fitting. Use warm_start='fine_tune' "
                 "for compatible objective changes, or warm_start=False for a fresh fit."
@@ -398,7 +458,8 @@ class _BaseEON(BaseEstimator):
 
         Higher values are more typical.
         A complete override replaces query policy but not the fitted reference.
-        Cross-policy scores therefore compare different recovery modes.
+        Cross-policy scores therefore compare different recovery modes. An override
+        without ``epsilon_P`` keeps the fitted temperature.
         A fit without instance-weight recovery raises through Network.
         """
         continuous, categorical = self._prepare_prediction_features(X)
@@ -417,7 +478,8 @@ class _BaseEON(BaseEstimator):
 
         Values are relative to the retained training normaliser, not normalised
         across this query batch or automatically comparable across refits.
-        Omission uses fitted policy, a complete configuration replaces it.
+        Omission uses fitted policy, a complete configuration replaces it, except that
+        one without ``epsilon_P`` keeps the fitted temperature.
         A fit without instance-weight recovery raises.
         """
         continuous, categorical = self._prepare_prediction_features(X)
@@ -496,7 +558,8 @@ class _BaseEON(BaseEstimator):
 
         Standard input blends fitted centroids, manifold input blends projections onto
         the clusters' planes. Both use final input affiliations under the fitted
-        prediction policy, or a complete call-time replacement.
+        prediction policy, or a complete call-time replacement; a replacement without
+        ``epsilon_P`` keeps the fitted temperature.
         Supply rows in the same units and column order used at fit. Every layout
         returns a ``TabularReconstruction`` of fresh arrays. A continuous-only layout
         has empty categorical fields. Numerical values retain fitted computation

@@ -24,10 +24,10 @@ from entlearn.recipe import (
 _OBJECTIVE_FIELDS: dict[type, set[str]] = {
     Input: {"epsilon", "epsilon_D", "epsilon_T", "delta_cat"},
     ManifoldInput: {"epsilon", "epsilon_T", "alpha"},
-    Hidden: {"epsilon"},
-    ClassificationHead: set(),
+    Hidden: {"epsilon", "epsilon_ratio"},
+    ClassificationHead: {"theta_alpha"},
     RegressionHead: {"epsilon_M", "W_M"},
-    Connection: {"delta", "theta_alpha"},
+    Connection: {"delta", "delta_ratio", "theta_alpha"},
 }
 
 
@@ -49,13 +49,6 @@ def validate_replacement(fitted: _FittedNetwork, recipe: Recipe) -> None:
                 raise ValueError(
                     f"fine_tune cannot change {before.name!r} parameter {field.name!r}"
                 )
-    head = _build_recipe(recipe).head
-    if (
-        isinstance(head, RegressionHead)
-        and head.W_M is not None
-        and len(head.W_M) != fitted.schema.M
-    ):
-        raise ValueError("fixed W_M must match the fitted number of regression targets")
 
 
 def replace_objective(graph: _CompiledGraph, recipe: Recipe, data: _StagedData) -> None:

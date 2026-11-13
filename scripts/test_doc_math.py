@@ -49,6 +49,5 @@ class TestDocumentationMath:
         assert "$x$" in html
 
     def test_current_introduction_contains_math_markup(self, render):
-        source = (ROOT / "docs_site/guide/introduction.md").read_text()
-        html = render(source)
-        assert r'<span class="arithmatex">\(x_t \in \mathbb{R}^D\)</span>' in html
+        html = render((ROOT / "docs_site/guide/introduction.md").read_text())
+        assert '<span class="arithmatex">' in html

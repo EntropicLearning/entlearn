@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from entlearn.helpers import reporting
+    from entlearn.helpers._delta_cat import delta_cat_guess
     from entlearn.helpers._feature_weights import feature_weights
 
 __all__ = [
+    "delta_cat_guess",
     "feature_weights",
     "reporting",
 ]
@@ -15,6 +17,10 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     """Load statistical helpers only when explicitly requested."""
+    if name == "delta_cat_guess":
+        from entlearn.helpers import _delta_cat
+
+        return _delta_cat.delta_cat_guess
     if name == "feature_weights":
         from entlearn.helpers import _feature_weights
 

@@ -11,6 +11,7 @@ import torch
 from entlearn.network.build import _BuiltRecipe
 from entlearn.network.state import DataSchema
 from entlearn.network.validation import (
+    _all_finite,
     _normalise_weights,
     _stage_classification_target,
     _stage_regression_target,
@@ -101,7 +102,6 @@ def _classification_weights(
     if (
         bool(torch.isfinite(labelled_mass))
         and bool(labelled_mass > 0)
-        and bool(torch.isfinite(weighted_target).all())
         and bool((weighted_target[support] > 0).all())
     ):
         return weighted_target / labelled_mass * labelled_share
@@ -134,7 +134,7 @@ def _regression_weights(
         sample_weights * task_weights,
         torch.zeros_like(sample_weights),
     )
-    if bool(torch.isfinite(weights).all()) and bool((weights[support] > 0).all()):
+    if _all_finite(weights) and bool((weights[support] > 0).all()):
         return _normalise_weights(weights, name="regression labelled weights") * labelled_share
 
     # Add logs before the max shift so opposing scales do not underflow during multiplication.
@@ -179,27 +179,14 @@ def _materialise_callable_task_weights(
     return task_weights
 
 
-def _check_leading_shapes(
-    recipe: _BuiltRecipe, X_cont: object, target: object
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Check the feature and target tensors' ranks, row counts and fixed ``W_M`` length."""
+def _check_leading_shapes(X_cont: object, target: object) -> tuple[torch.Tensor, torch.Tensor]:
+    """Check the feature and target tensors' ranks and row counts."""
     if not isinstance(X_cont, torch.Tensor) or not isinstance(target, torch.Tensor):
         raise ValueError("X_cont and y must be tensors")
     if target.ndim == 0:
         raise ValueError("y must be at least one-dimensional")
     if X_cont.ndim == 2 and target.shape[0] != X_cont.shape[0]:
         raise ValueError("X_cont and y must have the same row count")
-    if (
-        isinstance(recipe.head, RegressionHead)
-        and target.ndim in (1, 2)
-        and recipe.head.W_M is not None
-    ):
-        output_width = 1 if target.ndim == 1 else target.shape[1]
-        if len(recipe.head.W_M) != output_width:
-            raise ValueError(
-                f"fixed W_M has length {len(recipe.head.W_M)} "
-                f"but the output dimension is {output_width}"
-            )
     return X_cont, target
 
 
@@ -299,6 +286,7 @@ def _stage_regression(
         dtype=continuous.dtype,
         device=continuous.device,
     )
+    output_weights = _fixed_output_weights(head, M, continuous.dtype, continuous.device)
     if task_weights is None:
         staged_task_weights = torch.ones(
             continuous.shape[0],
@@ -330,7 +318,6 @@ def _stage_regression(
         staged_task_weights,
         labelled_share,
     )
-    output_weights = _fixed_output_weights(head, continuous)
     target_mean = torch.mv(staged_target.transpose(0, 1), row_weights) / labelled_share
     return (
         staged_target,
@@ -341,12 +328,18 @@ def _stage_regression(
     )
 
 
-def _fixed_output_weights(head: RegressionHead, continuous: torch.Tensor) -> torch.Tensor | None:
-    """Return the head's fixed ``W_M`` normalised in the computation dtype, or ``None``."""
+def _fixed_output_weights(
+    head: RegressionHead, M: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor | None:
+    """Return the head's fixed ``W_M`` for ``M`` regression targets, normalised in ``dtype``."""
     if head.W_M is None:
         return None
-    output_weights = torch.tensor(head.W_M, dtype=continuous.dtype, device=continuous.device)
-    if not bool(torch.isfinite(output_weights).all()) or bool((output_weights <= 0).any()):
+    if len(head.W_M) != M:
+        raise ValueError(
+            f"fixed W_M has length {len(head.W_M)} but the number of regression targets is {M}"
+        )
+    output_weights = torch.tensor(head.W_M, dtype=dtype, device=device)
+    if not _all_finite(output_weights) or bool((output_weights <= 0).any()):
         raise ValueError("fixed W_M must be finite and positive in the computation dtype")
     return _normalise_weights(output_weights, name="fixed W_M")
 
@@ -366,7 +359,7 @@ def _stage_data(
     known_n_classes: int | None = None,
 ) -> _StagedData:
     """Stage shared features and weights, then the task target and inferred schema."""
-    X_cont, target = _check_leading_shapes(recipe, X_cont, target)
+    X_cont, target = _check_leading_shapes(X_cont, target)
     continuous, categorical, cardinalities = _stage_features(
         recipe, X_cont, X_cat, computation_dtype, categorical_cardinalities, fitted_schema
     )

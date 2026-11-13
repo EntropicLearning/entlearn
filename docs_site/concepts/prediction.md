@@ -69,13 +69,15 @@ $$
 $$
 
 Here, $\delta_{N+1}$ is the strength of the connection into the head, and $\varepsilon_P$ is the output temperature `PredictConfig.epsilon_P`.
+As in fitting, each probability is floored at the dtype's smallest positive normal number before its logarithm.
+A stored zero head entry therefore contributes a finite value rather than $-\infty$; this does not change the stored transition.
 
-At $\beta=1$, the probabilities are proportional to $\prod_k\Theta_{\mathrm{out}}[m,k]^{\Gamma_{tk}^{(N)}}$, a weighted **geometric mean** of the head's entries for class $m$.
+At $\beta=1$, the probabilities are proportional to $\prod_k\Theta_{\mathrm{out}}[m,k]^{\Gamma_{tk}^{(N)}}$, a weighted **geometric mean** of the floored head entries for class $m$.
 A larger $\beta$ sharpens the probabilities, and a smaller one flattens them.
 
 ### Classification: the arithmetic read-out
 
-With `PredictConfig(output_mode="arithmetic")`, an M head instead takes the affiliation-weighted **arithmetic mean** of its columns:
+With `PredictConfig(output_mode="arithmetic")`, a `Coupling.M` head instead takes the affiliation-weighted **arithmetic mean** of its columns:
 
 $$
 \hat\Pi_{tm}=\sum_{k}\Gamma_{tk}^{(N)}\Theta_{\mathrm{out}}[m,k].
@@ -91,9 +93,8 @@ With the geometric read-out, fitting chooses $\varepsilon_P$ automatically unles
 The chosen value is stored in `network.predict_config.epsilon_P`, and every later prediction reuses it.
 Calibration runs automatically during fitting.
 
-!!! note "Replacing the prediction configuration"
-    If you pass a new `PredictConfig` at prediction time and leave `epsilon_P` out, the read-out falls back to $\varepsilon_P=\delta_{N+1}$, which is $\beta=1$.
-    [Classification calibration](../guide/hyperparameters.md#classification-calibration) shows how to keep the fitted value instead.
+If you pass a new `PredictConfig` at prediction time and leave `epsilon_P` out, the read-out keeps the fitted value.
+A model fitted with the arithmetic read-out has no fitted value, so the geometric read-out then falls back to $\varepsilon_P=\delta_{N+1}$, which is $\beta=1$.
 
 Calibration minimises the weighted cross-entropy $\ell(\beta)$ of the single-pass predictions $\hat\Pi(\beta)$ on the training rows:
 
@@ -108,10 +109,10 @@ $\ell$ is convex in $\beta$, so a zero of its derivative is a minimum.
 ??? note "Calibration search and candidate selection"
     The algorithm runs once per fitted model:
 
-    1. **Find the stationary point.** Search $\log\beta$ between $\log 10^{-6}$ and $\log\beta_{\max}$ for a zero of the derivative, where $\beta_{\max}$ is $10^{6}$, or smaller if a larger $\beta$ would take $\varepsilon_P$ to the machine precision.
+    1. **Find the stationary point.** Search $\log\beta$ between $\log 10^{-6}$ and $\log 10^{6}$ for a zero of the derivative.
        The search uses Chandrupatla's method, which combines inverse quadratic interpolation with bisection, and it stops when the bracket in $\log\beta$ is narrower than the square root of the machine precision.
        If the derivative has no sign change within the bracket, the search returns the bound at which $\ell$ is smaller.
-    2. **Collect the candidates.** They are the uncalibrated value $\varepsilon_P=\delta_{N+1}$, the value $\delta_{N+1}/\beta$ from step 1 and, when $\delta_{N+1}/10^{6}$ is at or below the machine precision, the hard read-out it implies.
+    2. **Collect the candidates.** They are the uncalibrated value $\varepsilon_P=\delta_{N+1}$, the value $\delta_{N+1}/\beta$ from step 1, which is soft whenever it is positive, and the hard read-out $\varepsilon_P=0$.
     3. **Score them with the read-out.** A candidate whose read-out gives zero probability to a class with target mass scores infinity. A hard read-out does this whenever a row's target mass is not all on its predicted class.
     4. **Keep the lowest score.** Ties go to the uncalibrated value. If every candidate scores infinity, fitting raises an error.
 
@@ -127,18 +128,22 @@ $\ell$ is convex in $\beta$, so a zero of its derivative is a minimum.
 When the instance weights are learned at a positive temperature, fitting also keeps the normaliser of their softmax:
 
 $$
-\log Z_{\mathrm{train}}=\log\sum_{t=1}^{T}\exp(-b_t^{(T)}/\varepsilon_T),
+\log Z_{\mathrm{train}}=\log\sum_{t=1}^{T}Tw_t\exp(-b_t^{(T)}/\varepsilon_T)=\log S-\frac{m}{\varepsilon_T},
 $$
 
 recomputed from the final geometry once fitting stops.
-A new observation then receives the weight its cost would have had in the training softmax, capped at one:
+It is kept in two parts. With the shifted cost $v_t=b_t^{(T)}-\varepsilon_T\log(Tw_t)$, these are the smallest such cost $m=\min_tv_t$ and $\log S=\log\sum_t\exp\big(-(v_t-m)/\varepsilon_T\big)$, which lies between $0$ and $\log T$.
+Both stay finite at any positive temperature, where $\log Z_{\mathrm{train}}$ itself can overflow.
+Since a new observation does not have any sample weight, we use the uniform weight $1/T$ (an uninformative prior).
+Its weight is then the weight its cost would have had in the training softmax, capped at one:
 
 $$
-W_T'[t]=\min\big(1,\exp(-b_t^{(T)}/\varepsilon_T-\log Z_{\mathrm{train}})\big).
+W_T'[t]=\min\Big(1,\exp\big(-(b_t^{(T)}-m)/\varepsilon_T-\log S\big)\Big).
 $$
 
 Here $b_t^{(T)}$ uses the new observation's own affiliations and discretisation errors.
 Each recovered weight lies between zero and one. 
+$TW_T'[t]$ is therefore the ratio $W_T[t]/w_t$ that a training observation with the same cost has.
 Recovery uses the training normaliser, so the query weights are independent of other query rows and their sum can differ from one.
 `network.score_samples` ranks them against the weights recovered on the training rows, as described in [Reconstruction and inlier percentiles](../guide/networks.md#reconstruction-and-inlier-percentiles).
 Recovery requires soft learned instance weights, as fixed and hard instance weights keep no normaliser.
@@ -189,7 +194,8 @@ One iteration updates the coordinates in the same order as fitting:
 3. **Input block.** The input affiliations update, and then the recovered instance weights, if any.
 
 Each update is the exact minimiser of $J$ over its coordinates, so $J$ never increases.
-The iterations stop when the relative change in $J$ is at most `tol`, or after `max_iter` iterations.
+The iterations stop by the fit's [stopping rule](learning.md#convergence-and-stopping), with $J$ in place of the loss, or after `max_iter` iterations.
+Here $C$ is the largest amount by which the entropy penalties in $J$ can lower it: $\varepsilon_n\log K_n$ for each soft clustering, and $\varepsilon_P\log M$ for a soft class distribution.
 !!! note "Batch-dependent stopping"
     Because $J$ averages over the batch, the stopping iteration, and therefore the prediction, can depend on which observations are predicted together.
 

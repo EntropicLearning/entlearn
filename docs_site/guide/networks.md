@@ -37,7 +37,7 @@ answer = network.predict(query)
 For this example, `answer` is a probability matrix with shape `(2,2)`, one row per observation and one column per class.
 
 !!! note "Classification predictions are probabilities"
-      Unlike a scikit-learn classifier's `predict`, `Network.predict` returns class probabilities. For regression, it returns predicted values.
+      Unlike a scikit-learn classifier's `predict`, `Network.predict` returns class probabilities for classification and predicted values for regression.
 
 Select the most likely class with `argmax`:
 
@@ -52,7 +52,7 @@ Continuous inputs `X` have shape `(n_samples, n_features)`, including when there
 The shape of `y` depends on the task. For **classification**, either class codes `(n_samples,)` with dtype `torch.int64` or label distributions `(n_samples, n_classes)` with dtype `torch.float32` or `torch.float64` are accepted.
 For **regression** the targets can be either `(n_samples,)`, `(n_samples,1)`, or `(n_samples, n_targets)` (for multi-target regression) with dtype `torch.float32` or `torch.float64`.
 
-For regression, a row containing `NaN` targets is treated as unlabelled. If only some targets are missing, `Network` warns and masks the whole row. The estimator rejects partially missing rows.
+For regression, a row containing `NaN` targets is treated as unlabelled. If only some targets are missing, `Network` warns and masks the whole row. The estimator rejects partially missing rows. At least one row must be labelled.
 
 **Categorical features**, if present, can be passed separately through the `X_cat` argument, which expects a list containing one tensor per categorical feature. See the `Network` reference for the supported representations.
 
@@ -60,7 +60,7 @@ Make sure that inputs and targets reside on the same `device` and have compatibl
 At prediction time, preserve the feature order and use the fitted model’s device and computation dtype.
 
 
-!!! warning "Feature scaling" 
+!!! warning "Feature scaling"
     Feature scaling can affect the distances used by the model. Scaling continuous features to comparable ranges, such as [0, 1], helps prevent their units from dominating these distances.
     Estimate the scaling from the training data and apply the same transformation to new observations. `Network` does **not** perform this preprocessing automatically.
 
@@ -118,7 +118,7 @@ query_affiliations = details.affiliations["input"]
 ```
 
 !!! info "Query and training affiliations"
-    Even for the original observations, query affiliations can differ from training affiliations.
+    Query affiliations can differ from training affiliations.
     Inspecting training affiliations and instance weights requires a fit or a [resumable save](#save-the-network).
 
 You can also plot the fitted model, provided that the `plotting` extra is installed:
@@ -127,13 +127,12 @@ You can also plot the fitted model, provided that the `plotting` extra is instal
 input_figure = network.plot(block="input", X_cont=X)
 ```
 
-Omit `block` to show all blocks and the loss history. The figure can be displayed directly in a notebook.
+Omit `block` to show all blocks and the loss history.
 Observations are coloured by their [query affiliations](../concepts/prediction.md#the-single-forward-pass).
 
 To follow fitting in the terminal, pass `verbose=1` for a final summary, or `verbose=2` for iteration logs.
-The default `verbose=0` disables these logs, but warnings are still emitted. You can inspect retained warnings through `network.diagnostics.warnings`.
+The default `verbose=0` disables these logs, but warnings are still emitted and can be inspected through `network.diagnostics.warnings`.
 See [Troubleshooting](troubleshooting.md) to send the logs elsewhere and for the meaning of each warning.
-
 See [reconstruction and inlier percentiles](#reconstruction-and-inlier-percentiles) for other queries, and [Plotting](plotting.md) for plots.
 
 ## Initialisation
@@ -164,9 +163,9 @@ network_from_state = Network.fit(
 The original `InitialState` is available after fitting through `network.initial_state`.
 It records the starting point before training and pruning. Use `network.inspect` for the learned values.
 
-!!! note "Cluster counts and eligible observations"
-    When generating input geometry, the initialiser caps `K` at the number of eligible observations with positive sample weight and emits a warning. With balanced classification initialisation, only labelled rows are eligible. Supplying `init_rows` further restricts the pool.
-    This happens before fitting and is separate from pruning empty clusters during training. The recipe keeps the requested `K`. `network.initial_state.input_geometry.K_active` records the initial width, and `network.schema.K_active` records the fitted width.
+!!! note "What if there are fewer observations than clusters?"
+    When generating input geometry, `K` is capped at the number of eligible observations with positive sample weight, with a warning. For balanced classification initialisation, only labelled rows are eligible. `init_rows`, when supplied, further restricts the pool.
+    This happens before fitting and is separate from pruning empty clusters during training. The recipe keeps the requested `K`; `network.initial_state.input_geometry.K_active` records the initial width, and `network.schema.K_active` records the fitted width.
     Supplied geometry is not truncated. A later fit from a capped state with the full `K` warns, and fits only the clusters the state holds.
 
 Set `n_inits` to compare several starting states:
@@ -192,7 +191,7 @@ You can obtain their individual predictions together:
 candidate_predictions = best_network.predict_all(query)
 ```
 
-The result has shape `(n_inits, n_queries, output_width)`. Ordinary `predict` uses the selected candidate.
+The result has shape `(n_inits, n_queries, output_width)`. Ordinary `predict` still uses the selected winner.
 If you only need the original starting states, use `retain="states"` instead.
 
 For comparisons using validation data, see [Model selection](model_selection.md).
@@ -203,7 +202,7 @@ The random initialisation uses a generator on the device of the data. As a resul
 This includes the seeds of the candidates when `n_inits` is above one.
 To repeat a fit, use the same seed, the same number of initialisations and the same kind of device.
 
-On CUDA, enable `torch.use_deterministic_algorithms(True)` before fitting to request deterministic operations. Reproducibility also depends on keeping the data, settings, device and software environment unchanged.
+A repeated fit on CUDA gives identical results, as it does on CPU, without `torch.use_deterministic_algorithms`. Reproducibility also depends on keeping the data, settings, device and software environment unchanged.
 
 A [saved network](#save-the-network) stores its fitted parameters, selected candidate and any retained members. Loading restores them without rerunning initialisation.
 
@@ -221,18 +220,18 @@ By default, predictions use a **single forward pass**, but **iterative predictio
     A **single forward pass** assigns query affiliations once, block by block. **Iterative prediction** repeatedly updates affiliations and prediction coordinates with the learned parameters fixed, and takes more computation.
 
     To use iterative prediction, replace the fitted prediction configuration:
-    
+
     ```python
     from dataclasses import replace
-    
+
     policy = replace(network.predict_config, predict_mode="iterative", max_iter=50)
     refined_answer = network.predict(query, predict_config=policy)
     ```
-    
+
     Here, `max_iter` limits prediction iterations. Evaluate the resulting predictions to decide whether refinement helps on your data.
 
-!!! note "A prediction configuration replaces the complete policy"
-    Passing a `PredictConfig` does not merge its settings with the fitted policy. Use `replace`, as above, if you only want to change selected settings. Omitting `predict_config` uses the fitted policy.
+!!! note "A prediction configuration replaces the fitted policy"
+    Passing a `PredictConfig` does not merge its settings with the fitted policy, with one exception: a geometric read-out that leaves `epsilon_P` out keeps the fitted output temperature. Use `replace`, as above, if you only want to change selected settings. Omitting `predict_config` uses the fitted policy.
 
 Iterative prediction reuses the fitted output temperature. Its stopping criterion uses the mean query objective, so splitting queries into different batches can change the stopping iteration.
 
@@ -291,7 +290,7 @@ continued = network.resume(X, y, max_iter=100)
 
 For this, the data must have the same rows, in the same order, with the same targets and weights as the original fit.
 Here, `max_iter=100` means at most 100 iterations **in total**, including those already completed.
-If the model has already converged, increasing this limit alone does not make it continue; a tighter `tol` may be needed.
+If the model has already converged a tighter `tol` may be needed.
 The returned network contains the continued fit, while the original `network` remains unchanged.
 
 To adapt the learned parameters to *different*, *compatible* observations, you can use `fine_tune` instead:
@@ -337,8 +336,8 @@ regression_network = Network.fit(
 Here, the regression head is initialised normally, while the input starts from the learned geometry and can continue learning.
 Using `captured_input.input_geometry.input` preserves its active cluster count, including any pruning during the original fit.
 
-Blocks are matched by name and must have compatible dimensions and feature meanings. Unmatched captured blocks are ignored with a warning. Select the blocks to reuse with `blocks`, or omit it to capture all fitted parameter groups.
-The new fit computes fresh affiliations and diagnostics.
+Blocks are matched by name and must have compatible dimensions and feature meanings; a captured block that matches no block of the new Recipe is ignored with a warning. Capture only the blocks you want to reuse: omitting `blocks` captures all fitted parameter groups.
+This starts a fresh fit with new affiliations and diagnostics. It does not resume the original trajectory.
 See the [Network reference](../reference/network.md#entlearn.Network.capture_current_state) for the full compatibility rules.
 
 ## Save the network
@@ -351,7 +350,7 @@ loaded = Network.load("network.safetensors")
 loaded_answer = loaded.predict(query)
 ```
 
-The file is self-contained: tensors and metadata are stored together.
+Tensors and metadata are stored together.
 Both save modes retain the recipe, fitted parameters and prediction policy, diagnostics, original initial states and any retained fitted members.
 
 The default save **omits training affiliations and instance weights**, reducing the stored information tied to individual training rows. The loaded model supports prediction, reconstruction of supplied observations and fine-tuning. Resuming the original fit requires a resumable save.
@@ -381,7 +380,7 @@ The main differences after loading are:
 !!! warning "Considerations for resuming a fit from a saved model"
 
     You must still retain the original data, targets and weights, and supply them in the same order when resuming. The loader checks the saved state, but cannot verify that the data you later supply is identical to the original data.
-    
+
     Keep the preprocessing steps, feature meanings and mappings between class codes and external labels alongside the model: `Network` does not manage these for you.
 
 ### What loading checks

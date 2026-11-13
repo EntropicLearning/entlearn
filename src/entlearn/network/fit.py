@@ -109,7 +109,7 @@ def _materialise(
         training_rows=data.X_cont.shape[0],
     )
     session = _FitSession.open(graph, data)
-    update_affiliations_(input_block, session)
+    update_affiliations_(input_block, session, coupled=False)
     geometry = initial_state.input_geometry
     generated = geometry is not None and not geometry.captured
     if isinstance(input_block, _StandardInputBlock) and generated:
@@ -131,13 +131,14 @@ def _fit_iteration_(session: _FitSession) -> None:
 
 
 def _loss(session: _FitSession) -> float:
-    """Return block then connection losses in stable forward graph order."""
+    """Return block then connection losses in stable forward graph order.
+
+    The blocks' offsets sum to ``session.offset``.
+    """
     workspace = session.workspace
     workspace.loss.zero_()
     graph = session.graph
-    for name in graph.order:
-        block = graph.blocks[name]
-        block.partial_loss_(session)
+    session.offset = sum(graph.blocks[name].partial_loss_(session) for name in graph.order)
     for connection in graph.connections:
         target = graph.blocks[connection.target]
         if isinstance(target, _HiddenBlock):
@@ -149,12 +150,12 @@ def _loss(session: _FitSession) -> float:
     return float(workspace.loss.item())
 
 
-def _converged(history: list[float], tol: float, dtype: torch.dtype) -> bool:
-    """Return whether the final relative loss change meets ``tol``."""
+def _converged(history: list[float], tol: float, dtype: torch.dtype, offset: float) -> bool:
+    """Return whether the final loss change relative to ``|L_prev + offset|`` meets ``tol``."""
     if len(history) < 2:
         return False
     previous, current = history[-2:]
-    return abs(current - previous) / max(abs(previous), _eps(dtype)) <= tol
+    return abs(current - previous) / max(abs(previous + offset), _eps(dtype)) <= tol
 
 
 def _record_loss_warning(session: _FitSession, history: list[float], offset: int = 0) -> None:
@@ -255,11 +256,11 @@ def _optimise(
             session,
             prior.loss_history[-1],
             history[0],
-            previous.schema.computation_dtype,
+            prior.checkpoint_dtype,
         )
         # Changing numerical precision alone must not reopen an accepted stop.
         converged = (prior.converged and tol >= previous.tol) or _converged(
-            list(prior.loss_history), tol, session.data.X_cont.dtype
+            list(prior.loss_history), tol, session.data.X_cont.dtype, session.offset
         )
     n_iter = 0
     remaining = max(0, max_iter - offset)
@@ -271,12 +272,13 @@ def _optimise(
         _record_loss_warning(session, history, offset)
         _report_loss(logger, verbose, offset + iteration, history[-1])
         n_iter = iteration
-        converged = _converged(history, tol, session.data.X_cont.dtype)
+        converged = _converged(history, tol, session.data.X_cont.dtype, session.offset)
     trajectory = _Trajectory(
         loss_history=tuple(history),
         n_iter=n_iter,
         converged=converged,
         warnings=tuple(session.warning_messages),
+        checkpoint_dtype=session.data.X_cont.dtype,
     )
     if previous is not None:
         prior = previous.trajectory
@@ -285,6 +287,7 @@ def _optimise(
             loss_history=prior.loss_history + trajectory.loss_history[1:],
             n_iter=offset + n_iter,
             warnings=prior.warnings + trajectory.warnings,
+            checkpoint_dtype=trajectory.checkpoint_dtype if n_iter else prior.checkpoint_dtype,
         )
     refresh_log_partition_(session.graph.input, session)
     _report_summary(logger, verbose, trajectory)

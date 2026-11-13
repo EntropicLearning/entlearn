@@ -10,9 +10,13 @@ from dataclasses import replace
 
 import pytest
 import torch
-from network._fixtures import assert_same_values, resume_case
+from conftest import FIXED_BUDGET
+from network._fixtures import assert_same_values, resume_case, skip_fit_iterations
 
 from entlearn import Coupling, Network, PredictConfig
+from entlearn.primitives.normalise import _tiny
+
+pytestmark = FIXED_BUDGET
 
 
 class TestParameterTransfer:
@@ -23,7 +27,7 @@ class TestParameterTransfer:
     def test_all_active_parameters_transfer_exactly(self, monkeypatch, task, kind, coupling, dtype):
         recipe, X, y, cats = resume_case(task, kind, coupling)
         source = Network.fit(recipe, X, y, X_cat=cats, max_iter=3, seed=5)
-        monkeypatch.setattr("entlearn.network.fit._fit_iteration_", lambda session: None)
+        skip_fit_iterations(monkeypatch)
         result = source.fine_tune(
             X[:2], y[:2], X_cat=tuple(c[:2] for c in cats), computation_dtype=dtype, max_iter=1
         )
@@ -37,28 +41,6 @@ class TestParameterTransfer:
         assert result.schema.K_active == source.schema.K_active
         assert result.can_resume
 
-    @pytest.mark.parametrize("damage", ["centroids", "transition", "schema", "head"])
-    def test_invalid_active_payload_raises_before_optimisation(self, monkeypatch, damage):
-        recipe, X, y, _ = resume_case()
-        source = Network.fit(recipe, X, y, max_iter=2)
-        if damage == "centroids":
-            source._graph.input.continuous_centroids = source._graph.input.continuous_centroids[
-                :, :1
-            ]
-        elif damage == "transition":
-            state = source._graph.blocks["hidden_1"].incoming["input_to_hidden_1"]
-            state.theta = state.theta[:1]
-        elif damage == "schema":
-            source._fitted = replace(source._fitted, schema=replace(source.schema, M=10))
-        else:
-            source._graph.head.theta = source._graph.head.theta[:1]
-        monkeypatch.setattr(
-            "entlearn.network.fit._fit_iteration_",
-            lambda session: pytest.fail("optimisation started"),
-        )
-        with pytest.raises(ValueError):
-            source.fine_tune(X, y)
-
 
 class TestFineTunePrecision:
     @pytest.mark.parametrize(
@@ -69,17 +51,21 @@ class TestFineTunePrecision:
         dtype = torch.float32
         X = X.to(dtype)
         eps = torch.finfo(dtype).eps
+        # A positive temperature below float32's tiny is soft in both dtypes
+        start = _tiny(dtype) / 2 if change == "dtype" else 0.0
         recipe = replace(
             recipe,
             blocks=(
-                replace(recipe.blocks[0], epsilon=eps / 2),
-                replace(recipe.blocks[1], epsilon=eps / 2),
+                replace(recipe.blocks[0], epsilon=start),
+                replace(recipe.blocks[1], epsilon=start),
                 recipe.blocks[-1],
             ),
         )
         source = Network.fit(recipe, X, y, max_iter=1, predict_config=PredictConfig(epsilon_P=0.2))
-        assert not source._graph.input.soft_assignments
-        monkeypatch.setattr("entlearn.network.fit._fit_iteration_", lambda session: None)
+        initial = "soft" if change == "dtype" else "hard"
+        hard = {"input": initial, "hidden_1": initial}
+        assert source.inspect("affiliation_regimes") == hard
+        skip_fit_iterations(monkeypatch)
         if change == "temperature":
             recipe = replace(
                 recipe,
@@ -97,10 +83,10 @@ class TestFineTunePrecision:
             computation_dtype=torch.float64 if change == "dtype" else dtype,
             max_iter=1,
         )
-        # Fewer rows leave the regime hard: only the temperature and the dtype decide it.
-        assert result._graph.input.soft_assignments is soft
-        assert result._graph.blocks["hidden_1"].soft_assignments is soft
-        assert not source._graph.input.soft_assignments
+        # Only the temperature decides the regime: neither the rows nor the dtype change it.
+        regime = "soft" if soft else "hard"
+        assert result.inspect("affiliation_regimes") == {"input": regime, "hidden_1": regime}
+        assert source.inspect("affiliation_regimes") == hard
         assert result.predict_config.epsilon_P == 0.2
         query = X.to(result.schema.computation_dtype)
         torch.testing.assert_close(

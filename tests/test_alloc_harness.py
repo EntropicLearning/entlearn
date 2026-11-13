@@ -41,7 +41,7 @@ class TestAssertZeroAlloc:
         assert_zero_alloc(lambda: out.add_(a))
 
     def test_raises_on_factory_allocation(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError, match="factory-function allocations"):
             assert_zero_alloc(lambda: torch.zeros(4, 4))
 
 

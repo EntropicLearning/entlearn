@@ -49,6 +49,11 @@ def _require_positive_finite(value: object, field: str) -> None:
         raise ValueError(f"{field} must be finite and positive")
 
 
+def _require_optional_positive_finite(value: object, field: str) -> None:
+    if value is not None:
+        _require_positive_finite(value, field)
+
+
 def _require_theta_alpha(value: object, field: str) -> None:
     scalar = _safe_real_float(value)
     if scalar is None or not math.isfinite(scalar) or scalar < 1:
@@ -116,10 +121,14 @@ class Input:
             positive value learns them every iteration. Must lie in ``[0, inf]``.
         epsilon_T: Instance-weight temperature. Defaults to ``inf``, which freezes the
             instance weights at the supplied sample weights (or uniform when none are
-            given). A finite positive value learns them every iteration. Must lie in ``[0, inf]``.
+            given). A finite positive value learns them every iteration, relative to the
+            sample weights. Must lie in ``[0, inf]``.
         W_std: Standard deviation of the logistic-normal feature-weight initialisation.
             ``0`` (the default) starts from a uniform feature weighting.
         delta_cat: Scale of the categorical channel relative to the continuous one.
+            ``None`` (the default) sets it at fit from the training rows with
+            :func:`entlearn.helpers.delta_cat_guess`, or to ``1`` when the data have no
+            varying continuous feature or no categorical feature with two levels.
         centroid_strategy: Centroid-seeding strategy, ``"kmeans++"`` (the default) or
             ``"greedy-kmeans++"``, which keeps the best of several candidates per seed.
         greedy_candidates: Fixed per-seed candidate count for ``"greedy-kmeans++"``.
@@ -135,7 +144,7 @@ class Input:
     epsilon_D: float = math.inf
     epsilon_T: float = math.inf
     W_std: float = 0.0
-    delta_cat: float = 1.0
+    delta_cat: float | None = None
     centroid_strategy: Literal["kmeans++", "greedy-kmeans++"] = "kmeans++"
     greedy_candidates: int | None = None
     balanced: bool = False
@@ -148,7 +157,8 @@ class Input:
         _require_weight_temperature(self.epsilon_D, "epsilon_D")
         _require_weight_temperature(self.epsilon_T, "epsilon_T")
         _require_nonnegative_finite(self.W_std, "W_std")
-        _require_nonnegative_finite(self.delta_cat, "delta_cat")
+        if self.delta_cat is not None:
+            _require_nonnegative_finite(self.delta_cat, "delta_cat")
         _require_centroid_controls(self.centroid_strategy, self.greedy_candidates, self.balanced)
 
 
@@ -159,7 +169,8 @@ class ManifoldInput:
     A continuous-only variant of :class:`Input` that clusters using per-cluster
     local subspaces. Each cluster contains an
     orthonormal projector spanning a ``subspace_dimension``-dimensional hyperplane, and
-    distances are measured according to cost ``alpha`` along the hyperplane and ``1 + alpha`` off it.
+    distances are measured according to cost ``alpha`` along the hyperplane and ``1 + alpha`` off it,
+    averaged over the continuous features as the standard input's distance is.
 
     Attributes:
         K: Number of clusters.
@@ -199,20 +210,44 @@ class ManifoldInput:
 class Hidden:
     """Description of a hidden clustering block.
 
+    A hidden block's affiliation temperature can be given either as a value,
+    ``epsilon``, or as a ratio to the strength of the incoming connection,
+    ``epsilon_ratio``.
+
     Attributes:
         K: Number of clusters.
-        epsilon: Affiliation temperature, as in :class:`Input`.
+        epsilon: Affiliation temperature, as in :class:`Input`. ``None`` (the default)
+            gives ``0``, unless ``epsilon_ratio`` is given. Do not provide it when
+            ``epsilon_ratio`` is given.
+        epsilon_ratio: The affiliation temperature divided by the ``delta`` of the block's
+            incoming connection, using the resolved ``delta`` if ``delta_ratio`` is set.
+            ``None`` (the default) uses ``epsilon``. A finite value ``>= 0`` sets the
+            temperature to ``epsilon_ratio * delta`` whenever the :class:`Recipe` is
+            fitted. The
+            :class:`Recipe` stores the ratio, and :meth:`Recipe.resolve_ratios`
+            returns a recipe with the equivalent ``epsilon`` values.
         name: Block name.
     """
 
     K: int = 3
-    epsilon: float = 0.0
+    epsilon: float | None = None
+    epsilon_ratio: float | None = None
     name: str = ""
 
     def __post_init__(self) -> None:
         """Validate the hidden-block attributes."""
         _require_positive_integer(self.K, "K")
-        _require_nonnegative_finite(self.epsilon, "epsilon")
+        if self.epsilon_ratio is None:
+            if self.epsilon is None:
+                object.__setattr__(self, "epsilon", 0.0)
+            _require_nonnegative_finite(self.epsilon, "epsilon")
+        else:
+            _require_nonnegative_finite(self.epsilon_ratio, "epsilon_ratio")
+            if self.epsilon is not None:
+                raise ValueError(
+                    "epsilon_ratio cannot be combined with an explicit epsilon; set "
+                    "epsilon=None, or epsilon_ratio=None to use epsilon"
+                )
 
 
 @dataclass(frozen=True)
@@ -227,18 +262,24 @@ class ClassificationHead:
             ``"M"`` or ``"S"`` is accepted.
         n_classes: Declared number of classes. ``None`` (the default) infers it from the labelled
             target codes at fit time. A declared value keeps gaps in the class codes valid.
+        theta_alpha: Dirichlet pseudocount strength for ``theta_out``; ``1`` (the default)
+            disables the prior exactly. Finite and ``>= 1``. A value above one keeps every class probability positive, so a class
+            a cluster has not seen costs a finite amount rather than ``-log`` of the
+            dtype's smallest normal number.
         name: Block name.
     """
 
     coupling: Coupling = Coupling.M
     n_classes: int | None = None
+    theta_alpha: float = 1.0
     name: str = ""
 
     def __post_init__(self) -> None:
-        """Coerce the coupling and validate the declared class count."""
+        """Coerce the coupling and validate the declared class count and prior."""
         object.__setattr__(self, "coupling", _coerce_coupling(self.coupling))
         if self.n_classes is not None:
             _require_positive_integer(self.n_classes, "n_classes")
+        _require_theta_alpha(self.theta_alpha, "theta_alpha")
 
 
 @dataclass(frozen=True)
@@ -289,13 +330,24 @@ class Connection:
 
     A connection into a hidden block configures transition state owned by that target, consisting of
     the coupling and pseudocount. A connection into a head has neither. The
-    head owns its output parameters and consumes only ``delta``.
+    head owns its output parameters, and a classification head its own coupling and
+    pseudocount, so the connection owns only ``delta``.
+
+    The coupling strength can be given either as a value, ``delta``, or as a ratio to the
+    strength of the previous connection, ``delta_ratio``.
 
     Attributes:
         name: Connection name.
         source: Name of the upstream block.
         target: Name of the downstream block.
-        delta: Coupling strength between the two blocks. Finite and positive; defaults to ``1``.
+        delta: Coupling strength between the two blocks. Finite and positive. ``None`` (the
+            default) gives ``1``, unless ``delta_ratio`` is given.
+        delta_ratio: This connection's ``delta`` divided by the ``delta`` of the previous
+            connection. ``None`` (default) uses ``delta``. A
+            finite positive value sets ``delta`` to ``delta_ratio`` times the previous
+            ``delta`` whenever the :class:`Recipe` is fitted.  The
+            :class:`Recipe` stores the ratio, and :meth:`Recipe.resolve_ratios` returns
+            the ``delta`` it gives.
         coupling: Which axis of the transition matrix sums to one; see :class:`Coupling`.
             When the target is a hidden block, ``None`` (the default) becomes ``M`` in the
             :class:`Recipe`, which stores the resolved value. A connection into a head
@@ -303,13 +355,15 @@ class Connection:
         theta_alpha: Dirichlet pseudocount strength for the transition matrix; ``1``
             disables the prior exactly. Finite and ``>= 1``. When the target is a hidden
             block, ``None`` (the default) becomes ``1`` in the :class:`Recipe`, which
-            stores the resolved value. A connection into a head cannot carry it.
+            stores the resolved value. A connection into a head cannot carry it; a
+            classification head takes its own on :class:`ClassificationHead`.
     """
 
     name: str
     source: str
     target: str
-    delta: float = 1.0
+    delta: float | None = None
+    delta_ratio: float | None = None
     coupling: Coupling | None = None
     theta_alpha: float | None = None
 
@@ -319,7 +373,17 @@ class Connection:
             isinstance(value, str) and value for value in (self.name, self.source, self.target)
         ):
             raise ValueError("connection name, source and target must be non-empty strings")
-        _require_positive_finite(self.delta, "delta")
+        if self.delta_ratio is None:
+            if self.delta is None:
+                object.__setattr__(self, "delta", 1.0)
+            _require_positive_finite(self.delta, "delta")
+        else:
+            _require_positive_finite(self.delta_ratio, "delta_ratio")
+            if self.delta is not None:
+                raise ValueError(
+                    "delta_ratio cannot be combined with an explicit delta; set delta=None, "
+                    "or delta_ratio=None to use delta"
+                )
         if self.coupling is not None:
             object.__setattr__(self, "coupling", _coerce_coupling(self.coupling))
         if self.theta_alpha is not None:
@@ -336,8 +400,11 @@ class Recipe:
     acyclicity and task combinations, and raises ``ValueError`` on the first violation. On
     every hidden-target connection it stores the defaults for the fields left as ``None``:
     ``M`` for the coupling and ``1`` for ``theta_alpha``, as :meth:`chain` does. A
-    structurally valid graph the builder cannot yet execute is accepted here and rejected
-    once at ``Network`` entry.
+    connection's ``delta_ratio`` and a hidden block's ``epsilon_ratio`` are stored as
+    provided. :meth:`resolve_ratios` returns a recipe
+    with the equivalent ``epsilon`` and ``delta`` values. A structurally valid graph
+    the builder cannot yet execute is accepted here and rejected at ``Network``
+    entry.
 
     Attributes:
         blocks: The block descriptions, in declared order.
@@ -347,7 +414,7 @@ class Recipe:
     blocks: tuple[Block, ...]
     connections: tuple[Connection, ...]
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901
         """Canonicalise descriptions and validate graph structure."""
         object.__setattr__(self, "blocks", tuple(self.blocks))
         object.__setattr__(self, "connections", tuple(self.connections))
@@ -414,6 +481,33 @@ class Recipe:
                 raise ValueError("every input block must have an outgoing connection")
             if not outgoing and not isinstance(block, Head):
                 raise ValueError("every graph output must be a head")
+        self.resolve_ratios()  # raises on a ratio the graph cannot resolve
+
+    def resolve_ratios(self) -> Recipe:
+        """Return the Recipe with all ratios replaced by the equivalent explicit value.
+
+        Every resolved connection sets ``delta_ratio=None``. A chain of ratios resolves from its first
+        explicit ``delta``. A hidden block that sets ``epsilon_ratio`` takes
+        ``epsilon = epsilon_ratio * delta``, using the resolved ``delta``. Every resolved
+        block sets ``epsilon_ratio=None``. A fit uses these values, and the fitted
+        ``Network`` keeps the original Recipe. A Recipe without a ratio is returned unchanged.
+        """
+        deltas = self._resolved_deltas()
+        blocks = tuple(
+            replace(block, epsilon=self._ratio_epsilon(block, deltas), epsilon_ratio=None)
+            if isinstance(block, Hidden) and block.epsilon_ratio is not None
+            else block
+            for block in self.blocks
+        )
+        connections = tuple(
+            replace(connection, delta=deltas[connection.name], delta_ratio=None)
+            if connection.delta_ratio is not None
+            else connection
+            for connection in self.connections
+        )
+        if blocks == self.blocks and connections == self.connections:
+            return self
+        return replace(self, blocks=blocks, connections=connections)
 
     def stable_order(self) -> tuple[str, ...]:
         """Return the block names in topological order. Declared order breaks ties.
@@ -471,26 +565,37 @@ class Recipe:
         cls,
         *blocks: Block,
         coupling: Coupling | str | Sequence[Coupling | str] | None = None,
-        delta: Numeric | Sequence[Numeric] = 1.0,
+        delta: Numeric | Sequence[Numeric | None] = 1.0,
         theta_alpha: Numeric | Sequence[Numeric] = 1.0,
+        delta_ratio: Numeric | Sequence[Numeric | None] | None = None,
     ) -> Recipe:
         """Create a Recipe as a chain of input-to-head block descriptions.
 
         Each block takes a positional default name (``"input"``, ``"hidden_1"``, ...,
         ``"output"``) unless it provides one, and consecutive blocks are joined by a
         connection named ``"{source}_to_{target}"`` by default. ``delta`` applies to every
-        connection, and ``coupling`` and ``theta_alpha`` to every hidden-target
+        connection without a ratio, and ``coupling`` and ``theta_alpha`` to every hidden-target
         connection. Each is one value broadcast over those connections or one value per
         connection, in order. By default every hidden-target connection takes
-        ``coupling="M"``. a chain without a hidden block rejects ``coupling``.
+        ``coupling="M"``. A chain without a hidden block rejects ``coupling``.
+
+        ``delta_ratio`` describes a connection's ``delta`` as a multiple of the previous
+        connection's, as on :class:`Connection`. One value applies to every connection
+        after the first, so ``delta_ratio=3`` makes each ``delta`` three times the one
+        before it. A sequence holds one value per connection in order, ``None`` where
+        ``delta`` gives the strength. ``delta`` then gives only the connections without a
+        ratio: one value applies to each of them, and a sequence holds ``None`` where a
+        ratio gives the strength.
 
         Args:
             *blocks: The block descriptions in chain order, an input block first and a
                 head last.
             coupling: Coupling for every hidden-target connection. ``None`` (the default)
                 gives ``M``.
-            delta: Coupling strength for every connection.
+            delta: Coupling strength for every connection without a ratio.
             theta_alpha: Pseudocount strength for every hidden-target connection.
+            delta_ratio: Each connection's ``delta`` divided by the previous
+                connection's. ``None`` (the default) gives no ratios.
 
         Returns:
             The graph-shaped description.
@@ -527,15 +632,16 @@ class Recipe:
                 named_blocks.append(replace(block, name="output"))
 
         hidden_couplings = cls._hidden_couplings(coupling, hidden_index)
-        deltas = cls._connection_scalars(
-            delta, len(named_blocks) - 1, "delta", _require_positive_finite
-        )
+        count = len(named_blocks) - 1
+        deltas, ratios = cls._chain_strengths(delta, delta_ratio, count)
         theta_alphas = cls._connection_scalars(
             theta_alpha, hidden_index, "theta_alpha", _require_theta_alpha
         )
         hidden = zip(hidden_couplings, theta_alphas, strict=True)
         connections: list[Connection] = []
-        for (source, target), strength in zip(pairwise(named_blocks), deltas, strict=True):
+        for (source, target), strength, ratio in zip(
+            pairwise(named_blocks), deltas, ratios, strict=True
+        ):
             connection_coupling, connection_theta_alpha = (
                 next(hidden) if isinstance(target, Hidden) else (None, None)
             )
@@ -545,19 +651,92 @@ class Recipe:
                     source=source.name,
                     target=target.name,
                     delta=strength,
+                    delta_ratio=ratio,
                     coupling=connection_coupling,
                     theta_alpha=connection_theta_alpha,
                 )
             )
         return cls(blocks=tuple(named_blocks), connections=tuple(connections))
 
+    @classmethod
+    def _chain_strengths(
+        cls,
+        delta: Numeric | Sequence[Numeric | None],
+        delta_ratio: Numeric | Sequence[Numeric | None] | None,
+        count: int,
+    ) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
+        """Expand chain strengths and ratios, clearing broadcast strengths beside ratios."""
+        ratios: tuple[float | None, ...] = (None,) * count
+        if isinstance(delta_ratio, Real):
+            if count == 1:
+                raise ValueError("a chain with one connection cannot receive delta_ratio")
+            ratios = (
+                None,
+                *cls._connection_scalars(
+                    delta_ratio, count - 1, "delta_ratio", _require_positive_finite
+                ),
+            )
+        elif delta_ratio is not None:
+            ratios = cls._connection_scalars(
+                delta_ratio, count, "delta_ratio", _require_optional_positive_finite
+            )
+        deltas = cls._connection_scalars(delta, count, "delta", _require_optional_positive_finite)
+        if isinstance(delta, Real):
+            deltas = tuple(
+                None if ratio is not None else value
+                for value, ratio in zip(deltas, ratios, strict=True)
+            )
+        return deltas, ratios
+
+    def _resolved_deltas(self) -> dict[str, float]:
+        """Return every connection's ``delta`` by name, each ratio resolved, or raise."""
+        position = {name: index for index, name in enumerate(self.stable_order())}
+        deltas: dict[str, float] = {}
+        # The previous connection leads into this one's source, so it is resolved first.
+        for connection in sorted(self.connections, key=lambda item: position[item.source]):
+            if connection.delta_ratio is None:
+                assert connection.delta is not None
+                deltas[connection.name] = connection.delta
+                continue
+            previous = [item.name for item in self.connections if item.target == connection.source]
+            if not previous:
+                raise ValueError(
+                    "delta_ratio requires a previous connection into its source block; "
+                    "a connection out of an input block has none"
+                )
+            if len(previous) > 1:
+                raise ValueError(
+                    "delta_ratio requires a source block with exactly one incoming connection"
+                )
+            delta = float(connection.delta_ratio) * deltas[previous[0]]
+            if not _is_positive_finite(delta):
+                raise ValueError("delta_ratio times the previous delta must be finite and positive")
+            deltas[connection.name] = delta
+        return deltas
+
+    def _ratio_epsilon(self, block: Hidden, deltas: dict[str, float]) -> float:
+        """Return the temperature a hidden block's ``epsilon_ratio`` gives, or raise.
+
+        ``deltas`` holds the resolved ``delta`` of every connection by name.
+        """
+        assert block.epsilon_ratio is not None
+        incoming = [
+            connection.name for connection in self.connections if connection.target == block.name
+        ]
+        if len(incoming) != 1:
+            raise ValueError("epsilon_ratio requires exactly one incoming connection")
+        epsilon = float(block.epsilon_ratio) * deltas[incoming[0]]
+        if not math.isfinite(epsilon):
+            raise ValueError("epsilon_ratio times the incoming delta must be finite")
+        return epsilon
+
     @staticmethod
     def _connection_scalars(
-        value: Numeric | Sequence[Numeric],
+        value: Numeric | Sequence[Numeric | None],
         count: int,
         field: str,
         validate: Callable[[object, str], None],
-    ) -> tuple[float, ...]:
+    ) -> tuple[float | None, ...]:
         if isinstance(value, Real):
             validate(value, field)
             return (float(value),) * count
@@ -569,7 +748,7 @@ class Recipe:
             raise ValueError(f"{field} must provide one value per generated connection")
         for scalar in values:
             validate(scalar, field)
-        return tuple(float(scalar) for scalar in values)
+        return tuple(None if scalar is None else float(scalar) for scalar in values)
 
     @staticmethod
     def _hidden_couplings(

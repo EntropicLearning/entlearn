@@ -4,7 +4,7 @@ from contextlib import nullcontext
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
     blobs,
     classification_recipe,
@@ -73,6 +73,7 @@ class TestValidationSelection:
             )
         assert calls == []
 
+    @FIXED_BUDGET
     def test_validation_labels_do_not_change_a_fold_models_calibration(self):
         X, codes = blobs(2, 0.28, rows_per_blob=4)
         y = torch.nn.functional.one_hot(codes, 2).to(DTYPE) * 0.8 + 0.1
@@ -138,7 +139,7 @@ class TestValidationSelection:
             if row_3 is None
             else pytest.raises(
                 ValueError,
-                match=rf"validation_pairs\[0\] {partition} needs positive-weight labelled rows",
+                match=rf"validation_pairs\[0\] {partition} needs positive-weight",
             )
         )
         with refusal:
@@ -152,6 +153,7 @@ class TestValidationSelection:
                 **weights,
             )
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("mode", ["single", "iterative"])
     def test_each_fold_and_full_data_member_match_independently_calibrated_fits(self, mode):
         X, codes = blobs(2, 0.25, rows_per_blob=4)
@@ -163,10 +165,13 @@ class TestValidationSelection:
         recipe = classification_recipe(Input(K=3, epsilon=0.2))
         pairs = validation_pairs()
         policy = PredictConfig(predict_mode=mode, max_iter=2)
-        observed = []
+        observed = {}
 
         def loss(prediction, target, *, fold, partition, sample_weights, class_weights, **other):
-            observed.append((partition, prediction.clone()))
+            fold_index = next(
+                index for index, pair in enumerate(pairs) if torch.equal(pair[0], fold[0])
+            )
+            observed.setdefault((fold_index, partition), []).append(prediction.clone())
             # Selection need not use calibration's weighted log-loss.
             return (
                 (prediction - target).square().sum(dim=1) * sample_weights
@@ -186,7 +191,8 @@ class TestValidationSelection:
             return_train_score=True,
             retain="members",
         )
-        for index, member in enumerate(selected.members):
+        assert selected.members is not None
+        for member in selected.members:
             for fold_index, (train, validation) in enumerate(pairs):
                 fitted = Network.fit(
                     recipe,
@@ -197,11 +203,10 @@ class TestValidationSelection:
                     initial_state=member.initial_state,
                     max_iter=5,
                 )
-                for part_index, rows in enumerate((train, validation)):
+                for partition, rows in (("training", train), ("validation", validation)):
                     prediction = fitted.predict(X[rows])[labelled[rows]]
-                    torch.testing.assert_close(
-                        prediction, observed[index * 4 + fold_index * 2 + part_index][1]
-                    )
+                    scored = observed[fold_index, partition]
+                    assert any(torch.equal(prediction, value) for value in scored)
             replay = Network.fit(
                 recipe,
                 X,
@@ -215,10 +220,17 @@ class TestValidationSelection:
             assert member.predict_config == replay.predict_config
             torch.testing.assert_close(member.predict(X), replay.predict(X))
 
+    # Retention does not depend on the backend, so each axis runs against one value of the other.
     @pytest.mark.parametrize(
-        "backend,n_jobs", [("threads", None), ("threads", 2), ("processes", 2)]
+        "backend,n_jobs,retain",
+        [
+            ("threads", None, "winner"),
+            ("threads", None, "states"),
+            ("threads", None, "members"),
+            ("threads", 2, "members"),
+            ("processes", 2, "members"),
+        ],
     )
-    @pytest.mark.parametrize("retain", ["winner", "states", "members"])
     def test_multiple_candidates_replay_each_geometry_and_retain_only_requested_values(
         self, backend, n_jobs, retain
     ):
@@ -250,8 +262,8 @@ class TestValidationSelection:
                 model = Network.fit(recipe, X[train], y[train], initial_state=state, max_iter=3)
                 training_losses.append(float(loss(model.predict(X[train]), y[train])))
                 losses.append(float(loss(model.predict(X[validation]), y[validation])))
-            assert outcome.score == pytest.approx(sum(losses) / len(pairs))
-            assert outcome.train_score == pytest.approx(sum(training_losses) / len(pairs))
+            assert outcome.score == sum(losses) / len(pairs)
+            assert outcome.train_score == sum(training_losses) / len(pairs)
             expected.append((outcome.score, outcome.score - outcome.train_score, outcome.index))
         index = min(expected)[2]
         winner = selected.diagnostics.initialisation_outcomes[index]
@@ -346,7 +358,7 @@ class TestValidationSelection:
 
     def test_the_flag_is_a_boolean_and_records_nothing_in_sample(self):
         X, y, _ = regression_blobs(2)
-        with pytest.raises(ValueError, match="return_train_score must be a boolean"):
+        with pytest.raises(ValueError, match=r"return_train_score .*boolean"):
             Network.fit(regression_recipe(), X, y, return_train_score=1)
         selected = Network.fit(
             regression_recipe(), X, y, n_inits=2, max_iter=3, return_train_score=True
@@ -403,6 +415,26 @@ class TestValidationSelection:
 
         Network.fit(classification_recipe(), X, y, selection_loss=loss, max_iter=2)
         assert observed == [dict(sample_weights=None, class_weights=None, task_weights=None)]
+
+    def test_a_supplied_state_ignores_validation_pairs_and_selection_loss(self):
+        X, y, _ = regression_blobs(2)
+        recipe = regression_recipe()
+        state = Network.initialise(recipe, X, y, seed=5)
+        calls = []
+        selected = Network.fit(
+            recipe,
+            X,
+            y,
+            initial_state=state,
+            validation_pairs=validation_pairs(),
+            selection_loss=lambda *args, **kwargs: calls.append(1) or 0.0,
+            return_train_score=True,
+            max_iter=3,
+        )
+        plain = Network.fit(recipe, X, y, initial_state=state, max_iter=3)
+        assert calls == []
+        assert selected.diagnostics == plain.diagnostics
+        torch.testing.assert_close(selected.predict(X), plain.predict(X), rtol=0, atol=0)
 
     def test_validation_requires_an_explicit_callback(self):
         X, y, _ = regression_blobs(2)

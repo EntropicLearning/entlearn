@@ -179,10 +179,12 @@ def decode_recipe(value: object) -> Recipe:
 
 def encode_schema(schema: DataSchema) -> dict[str, Any]:
     """Represent computation dtype without execution-device provenance."""
-    return {
-        **asdict(schema),
-        "computation_dtype": str(schema.computation_dtype).removeprefix("torch."),
-    }
+    return {**asdict(schema), "computation_dtype": encode_dtype(schema.computation_dtype)}
+
+
+def encode_dtype(dtype: torch.dtype) -> str:
+    """Name a floating dtype as ``decode_dtype`` reads it."""
+    return str(dtype).removeprefix("torch.")
 
 
 def decode_dtype(value: object) -> torch.dtype:
@@ -236,17 +238,19 @@ def encode_trajectory(trajectory: _Trajectory) -> dict[str, Any]:
     """Encode one fit's record, naming a diverged loss explicitly."""
     data = asdict(trajectory)
     data["loss_history"] = [encode_measurement(loss) for loss in trajectory.loss_history]
+    data["checkpoint_dtype"] = encode_dtype(trajectory.checkpoint_dtype)
     return data
 
 
 def decode_trajectory(value: object) -> _Trajectory:
-    """Require one fit's complete loss history, iteration count, convergence and warnings."""
-    data = record(value, "loss_history n_iter converged warnings")
+    """Require one fit's complete record, including the precision of its last loss."""
+    data = record(value, "loss_history n_iter converged warnings checkpoint_dtype")
     result = _Trajectory(
         loss_history=tuple(measurement(item) for item in sequence(data["loss_history"])),
         n_iter=integer(data["n_iter"], minimum=1),
         converged=boolean(data["converged"]),
         warnings=tuple(text(item) for item in sequence(data["warnings"])),
+        checkpoint_dtype=decode_dtype(data["checkpoint_dtype"]),
     )
     if len(result.loss_history) != result.n_iter + 1:
         raise ValueError("incomplete fitted diagnostics")

@@ -11,7 +11,7 @@ from network._fixtures import (
 )
 
 from entlearn import Coupling
-from entlearn.primitives.normalise import _eps
+from entlearn.primitives.normalise import _tiny
 
 
 class TestConnectionCountScale:
@@ -45,7 +45,7 @@ class TestConnectionCountScale:
         connection.update_parameters_(target, source, session)
 
         torch.testing.assert_close(connection.theta, expected)
-        logs = expected.clamp_min(_eps(DTYPE)).log()
+        logs = expected.clamp_min(_tiny(DTYPE)).log()
         delta = connection.description.delta / (1.0 if weighted else X.shape[0])
         expected_loss = -delta * ((native_counts * logs).sum() + native_prior * logs.sum())
         session.workspace.loss.zero_()

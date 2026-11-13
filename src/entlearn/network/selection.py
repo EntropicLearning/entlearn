@@ -16,13 +16,14 @@ from entlearn._warnings import _warn
 from entlearn.network.config import PredictConfig
 from entlearn.network.data import _StagedData
 from entlearn.network.dispatch import _map_seeds
+from entlearn.network.finalise import complete
 from entlearn.network.fit import (
     ConvergenceWarning,
     _report_loss,
     _report_summary,
 )
 from entlearn.network.folds import _Fold
-from entlearn.network.persistence.snapshot import decode_snapshot, encode_snapshot
+from entlearn.network.persistence import _evaluate_for_transport, _reduce_candidate
 from entlearn.network.predict import predict
 from entlearn.network.state import (
     InitialState,
@@ -52,7 +53,7 @@ class _SelectionLoss(Protocol):
 
 
 class _FitCandidate(Protocol):
-    """Fit and calibrate selected rows."""
+    """Fit selected rows, complete a fold or scored fit, and return any training-row prediction."""
 
     def __call__(
         self,
@@ -63,7 +64,8 @@ class _FitCandidate(Protocol):
         logger: logging.Logger | None,
         verbose: int,
         rows: torch.Tensor | None = None,
-    ) -> _FittedNetwork: ...
+        training_prediction: bool = False,
+    ) -> tuple[_FittedNetwork, torch.Tensor | None]: ...
 
 
 @dataclass(frozen=True)
@@ -77,34 +79,8 @@ class _CandidateEvaluation:
     train_score: float | None = None
 
     def __reduce__(self) -> tuple[Callable[..., _CandidateEvaluation], tuple[object, ...]]:
-        """Transport fitted candidates through the canonical model schema."""
-        if self.fitted is None:
-            return type(self), (
-                self.initial_state,
-                self.trajectories,
-                None,
-                self.score,
-                self.train_score,
-            )
-        # Selection has not finished, so the candidate has no selection history yet.
-        metadata, tensors = encode_snapshot(_NetworkRecord(self.fitted, _SelectionHistory(())))
-        return _restore_candidate, (
-            metadata,
-            tensors,
-            str(self.fitted.graph.input.continuous_centroids.device),
-            self.score,
-        )
-
-
-def _restore_candidate(
-    metadata: str,
-    tensors: dict[str, torch.Tensor],
-    device: str,
-    score: float,
-) -> _CandidateEvaluation:
-    """Reconstruct one worker result."""
-    fitted = decode_snapshot(metadata, tensors, device=device).fitted
-    return _CandidateEvaluation(fitted.initial_state, (fitted.trajectory,), fitted, score)
+        """Transport a worker's result through the canonical model snapshot."""
+        return _reduce_candidate(self)
 
 
 @torch.inference_mode()
@@ -116,14 +92,17 @@ def _predict_and_score(
     rows: torch.Tensor | None = None,
     fold: _Fold | None = None,
     partition: Literal["training", "validation"] = "training",
+    prediction: torch.Tensor | None = None,
 ) -> float:
-    """Predict requested rows and score labelled responses with raw weights."""
-    prediction = predict(
-        candidate.graph,
-        data.X_cont if rows is None else data.X_cont[rows],
-        X_cat_new=data.X_cat if rows is None else tuple(feature[rows] for feature in data.X_cat),
-        config=candidate.predict_config,
-    ).prediction
+    """Score the labelled responses of the requested rows, predicted unless ``prediction`` is given."""
+    if prediction is None:
+        assert rows is not None
+        prediction = predict(
+            candidate.graph,
+            data.X_cont[rows],
+            X_cat_new=tuple(feature[rows] for feature in data.X_cat),
+            config=candidate.predict_config,
+        ).prediction
     labelled = data.labelled if rows is None else data.labelled[rows]
     selected = labelled if rows is None else rows[labelled]
     # Callback inputs must not expose shared mutable storage. Boolean indexing allocates
@@ -164,17 +143,18 @@ def _evaluate_candidate(
 ) -> _CandidateEvaluation:
     """Evaluate a initialisation in-sample or across independent training folds."""
     if folds is None:
-        candidate = fit_one(
+        candidate, prediction = fit_one(
             seed,
             initial_state=initial_state,
             predict_config=predict_config,
             logger=logger,
             verbose=verbose,
+            training_prediction=selection_loss is not None,
         )
         score = (
             candidate.trajectory.loss_history[-1]
             if selection_loss is None
-            else _predict_and_score(candidate, data, selection_loss)
+            else _predict_and_score(candidate, data, selection_loss, prediction=prediction)
         )
         return _CandidateEvaluation(
             candidate.initial_state, (candidate.trajectory,), candidate, score
@@ -186,7 +166,7 @@ def _evaluate_candidate(
     state = initial_state
     for fold in folds:
         train, validation = fold
-        candidate = fit_one(
+        candidate, _ = fit_one(
             seed,
             initial_state=state,
             predict_config=fold_config,
@@ -244,15 +224,16 @@ def _finalise(
     evaluation: _CandidateEvaluation,
     *,
     fit_one: _FitCandidate,
+    data: _StagedData,
     predict_config: PredictConfig,
     logger: logging.Logger | None,
     verbose: int,
     report: Callable[[_Trajectory, str], None],
 ) -> _FittedNetwork:
-    """Return the candidate's full-data fit, refitting it first when only folds were fitted."""
+    """Return the kept candidate's completed full-data fit, refitting it if only folds were fitted."""
     fitted = evaluation.fitted
     if fitted is None:
-        fitted = fit_one(
+        fitted, _ = fit_one(
             record.seed,
             initial_state=evaluation.initial_state,
             predict_config=predict_config,
@@ -260,6 +241,7 @@ def _finalise(
             verbose=verbose,
         )
         report(fitted.trajectory, f"init {record.index} (seed={record.seed}), full-data refit")
+    fitted, _ = complete(fitted, data)
     return replace(fitted, initial_state=evaluation.initial_state)
 
 
@@ -296,27 +278,30 @@ def _select_candidate(
         non_converged=non_converged,
     )
 
+    evaluate = partial(
+        _evaluate_candidate,
+        fit_one=fit_one,
+        data=data,
+        initial_state=initial_state,
+        folds=folds,
+        selection_loss=selection_loss,
+        predict_config=predict_config,
+        return_train_score=return_train_score,
+        logger=fit_logger,
+        verbose=fit_verbose,
+    )
+    if parallel and parallel_backend == "processes":
+        evaluate = partial(_evaluate_for_transport, evaluate, data)
     backend, evaluations = _map_seeds(
-        partial(
-            _evaluate_candidate,
-            fit_one=fit_one,
-            data=data,
-            initial_state=initial_state,
-            folds=folds,
-            selection_loss=selection_loss,
-            predict_config=predict_config,
-            return_train_score=return_train_score,
-            logger=fit_logger,
-            verbose=fit_verbose,
-        ),
-        seeds,
-        n_jobs=n_jobs,
-        backend=parallel_backend if parallel else "serial",
+        evaluate, seeds, n_jobs=n_jobs, backend=parallel_backend if parallel else "serial"
     )
     best: InitOutcome | None = None
     best_evaluation: _CandidateEvaluation | None = None
     try:
-        for index, (seed, evaluation) in enumerate(zip(seeds, evaluations, strict=True)):
+        for index, seed in enumerate(seeds):
+            # Taking each result explicitly, and dropping it at the end of the body, leaves only
+            # the best evaluation alive while the next serial candidate fits.
+            evaluation = next(evaluations)
             record = InitOutcome(
                 index=index,
                 seed=seed,
@@ -338,6 +323,7 @@ def _select_candidate(
             # Keep only the best evaluation unless members are retained.
             if best is None or _winning_outcome((best, record)) is record:
                 best, best_evaluation = record, evaluation
+            del evaluation
     finally:
         # Stopping early still releases the runner's held warnings, on this line.
         evaluations.close()
@@ -345,6 +331,7 @@ def _select_candidate(
     finalise = partial(
         _finalise,
         fit_one=fit_one,
+        data=data,
         predict_config=predict_config,
         logger=fit_logger,
         verbose=fit_verbose,

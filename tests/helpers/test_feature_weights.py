@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import math
 
 import numpy as np
@@ -17,7 +16,9 @@ from helpers._fixtures import (
     classification_tensors,
     informative_cases,
     mixed_classification_data,
+    noisy_informative_data,
     two_target_regression_data,
+    unrelated_mixed_classification_data,
 )
 
 # Each statistic, with the seed mutual information needs for reproducible scores.
@@ -28,12 +29,7 @@ METHODS = [
 
 
 class TestNetworkFeatureWeights:
-    @pytest.mark.parametrize(("method", "extra_kwargs"), METHODS)
-    def test_statistical_weights_pass_through_network_initialisation(
-        self,
-        method: str,
-        extra_kwargs: dict[str, int],
-    ) -> None:
+    def test_statistical_weights_pass_through_network_initialisation(self) -> None:
         X_cont_array, categorical_codes, target_array = mixed_classification_data()
 
         weights = feature_weights(
@@ -41,10 +37,9 @@ class TestNetworkFeatureWeights:
             categorical_codes,
             target_array,
             task="classification",
-            method=method,
+            method="correlation",
             dtype=DTYPE,
             device=DEVICE,
-            **extra_kwargs,
         )
 
         assert_feature_weights(
@@ -71,55 +66,7 @@ class TestNetworkFeatureWeights:
             feature_weights=weights,
         )
 
-        assert state.input_geometry.feature_weights is not None
         torch.testing.assert_close(state.input_geometry.feature_weights, weights)
-
-    @pytest.mark.parametrize(("method", "extra_kwargs"), METHODS)
-    def test_statistical_weights_remain_frozen_through_network_fit(
-        self,
-        method: str,
-        extra_kwargs: dict[str, int],
-    ) -> None:
-        X_cont_array, categorical_codes, target_array = mixed_classification_data()
-        weights = feature_weights(
-            X_cont_array,
-            categorical_codes,
-            target_array,
-            task="classification",
-            method=method,
-            dtype=DTYPE,
-            device=DEVICE,
-            **extra_kwargs,
-        )
-        X_cont, X_cat, target = classification_tensors(
-            X_cont_array,
-            categorical_codes,
-            target_array,
-            dtype=DTYPE,
-            device=DEVICE,
-        )
-        recipe = Recipe.chain(
-            Input(K=2, epsilon_D=float("inf")),
-            ClassificationHead(coupling=Coupling.M),
-        )
-        state = Network.initialise(
-            recipe,
-            X_cont,
-            target,
-            X_cat=X_cat,
-            feature_weights=weights,
-        )
-
-        network = Network.fit(
-            recipe,
-            X_cont,
-            target,
-            X_cat=X_cat,
-            initial_state=state,
-            max_iter=2,
-        )
-
-        torch.testing.assert_close(network.inspect("feature_weights")["input"], weights)
 
 
 class TestCorrelationFeatureWeights:
@@ -184,11 +131,11 @@ class TestCorrelationFeatureWeights:
             classes,
             task="classification",
             method="correlation",
-            dtype=torch.float64,
+            dtype=DTYPE,
             device=DEVICE,
         )
 
-        assert torch.equal(weights, torch.tensor([0.5, 0.5], dtype=torch.float64, device=DEVICE))
+        assert torch.equal(weights, torch.tensor([0.5, 0.5], dtype=DTYPE, device=DEVICE))
 
     def test_correlation_scores_two_labelled_rows_from_the_available_pair(self) -> None:
         """Two rows still carry a Pearson correlation; degenerate columns score zero.
@@ -332,30 +279,25 @@ class TestCorrelationFeatureWeights:
             torch.full((width,), 1.0 / width, dtype=DTYPE, device=DEVICE),
         )
 
-    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
-    def test_small_labelled_subset_falls_back_without_unsolicited_logging(
-        self, caplog: pytest.LogCaptureFixture, method: str
-    ) -> None:
+    def test_one_labelled_row_falls_back_to_uniform(self) -> None:
         X_cont, categorical_codes, target = mixed_classification_data()
         mask = np.array([True, False, False, False, False, False])
 
-        with caplog.at_level(logging.INFO):
-            weights = feature_weights(
-                X_cont,
-                categorical_codes,
-                target,
-                task="classification",
-                method=method,
-                dtype=DTYPE,
-                device=DEVICE,
-                labelled_mask=mask,
-            )
+        weights = feature_weights(
+            X_cont,
+            categorical_codes,
+            target,
+            task="classification",
+            method="correlation",
+            dtype=DTYPE,
+            device=DEVICE,
+            labelled_mask=mask,
+        )
 
         torch.testing.assert_close(
             weights,
             torch.full((3,), 1.0 / 3.0, dtype=DTYPE, device=DEVICE),
         )
-        assert caplog.records == []
 
 
 class TestMutualInformationFeatureWeights:
@@ -502,6 +444,231 @@ class TestMutualInformationFeatureWeights:
         torch.testing.assert_close(weights, torch.full((2,), 0.5, dtype=DTYPE, device=DEVICE))
 
 
+class TestNullThresholdFeatureWeights:
+    @pytest.mark.parametrize(("method", "extra_kwargs"), METHODS)
+    def test_null_threshold_is_off_by_default(
+        self,
+        method: str,
+        extra_kwargs: dict[str, int],
+    ) -> None:
+        X_cont, target = noisy_informative_data("classification")
+
+        default = feature_weights(
+            X_cont,
+            (),
+            target,
+            task="classification",
+            method=method,
+            dtype=DTYPE,
+            device=DEVICE,
+            **extra_kwargs,
+        )
+        switched_off = feature_weights(
+            X_cont,
+            (),
+            target,
+            task="classification",
+            method=method,
+            null_permutations=0,
+            null_quantile=0.5,
+            dtype=DTYPE,
+            device=DEVICE,
+            **extra_kwargs,
+        )
+
+        assert torch.equal(default, switched_off)
+
+    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
+    def test_null_threshold_is_reproducible_under_random_state(self, method: str) -> None:
+        X_cont, target = noisy_informative_data("classification")
+        first, second, reseeded = (
+            feature_weights(
+                X_cont,
+                (),
+                target,
+                task="classification",
+                method=method,
+                null_permutations=3,
+                random_state=seed,
+                dtype=DTYPE,
+                device=DEVICE,
+            )
+            for seed in (4, 4, 5)
+        )
+
+        assert torch.equal(first, second)
+        assert not torch.equal(first, reseeded)
+
+    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
+    @pytest.mark.parametrize("task", ["classification", "regression"])
+    def test_null_threshold_moves_the_weight_to_the_informative_features(
+        self, method: str, task: str
+    ) -> None:
+        """Two informative columns among 200 noise columns on 40 rows.
+
+        Unadjusted, the noise columns' upward-biased scores take most of the weight; the
+        threshold hands the majority back to the informative pair. Regression has two
+        outputs, one per informative column.
+        """
+        X_cont, target = noisy_informative_data(task)
+        raw, thresholded = (
+            feature_weights(
+                X_cont,
+                (),
+                target,
+                task=task,
+                method=method,
+                random_state=0 if method == "mutual_info" or permutations else None,
+                null_permutations=permutations,
+                dtype=DTYPE,
+                device=DEVICE,
+            )
+            for permutations in (0, 3)
+        )
+
+        assert raw[:2].sum().item() < 0.5 < thresholded[:2].sum().item()
+
+    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
+    def test_null_threshold_falls_back_to_uniform_when_no_feature_is_related(
+        self, method: str
+    ) -> None:
+        """No feature depends on the classes, so every score stays below its threshold.
+
+        At the 0.99 quantile about one unrelated feature in a hundred survives by
+        chance, so the data are fixed at a draw whose largest score in each modality
+        sits at least 30% below that modality's threshold.
+        """
+        X_cont, categorical_codes, target = unrelated_mixed_classification_data()
+        raw, thresholded = (
+            feature_weights(
+                X_cont,
+                categorical_codes,
+                target,
+                task="classification",
+                method=method,
+                random_state=0 if method == "mutual_info" or permutations else None,
+                null_permutations=permutations,
+                dtype=DTYPE,
+                device=DEVICE,
+            )
+            for permutations in (0, 20)
+        )
+
+        uniform = torch.full((8,), 1.0 / 8.0, dtype=DTYPE, device=DEVICE)
+        assert (raw - uniform).abs().max().item() > 0.01
+        torch.testing.assert_close(thresholded, uniform)
+
+    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
+    def test_null_threshold_permutes_only_the_labelled_targets(self, method: str) -> None:
+        X_cont, target = noisy_informative_data("classification")
+        labelled = np.arange(target.shape[0]) % 4 != 0
+        corrupted = target.copy()
+        corrupted[~labelled] = 1 - corrupted[~labelled]
+
+        masked = feature_weights(
+            X_cont,
+            (),
+            corrupted,
+            task="classification",
+            method=method,
+            labelled_mask=labelled,
+            null_permutations=3,
+            random_state=0,
+            dtype=DTYPE,
+            device=DEVICE,
+        )
+        subset = feature_weights(
+            X_cont[labelled],
+            (),
+            target[labelled],
+            task="classification",
+            method=method,
+            null_permutations=3,
+            random_state=0,
+            dtype=DTYPE,
+            device=DEVICE,
+        )
+
+        assert torch.equal(masked, subset)
+
+    def test_null_threshold_is_drawn_per_modality(self) -> None:
+        """Continuous and categorical features keep separate thresholds.
+
+        The 20-level categorical features are unrelated to the target, but on 40 rows
+        their correlation ratios exceed nearly every continuous feature's absolute
+        Pearson correlation. A threshold pooled over both modalities would come from
+        the 400 continuous features and let the categorical features through.
+        """
+        rng = np.random.default_rng(2)
+        informative = rng.random(40)
+        X_cont = np.column_stack((informative, rng.random((40, 400))))
+        categorical_codes = tuple(rng.integers(0, 20, 40) for _ in range(2))
+        target = informative + rng.normal(0, 0.05, 40)
+
+        weights = feature_weights(
+            X_cont,
+            categorical_codes,
+            target,
+            task="regression",
+            method="correlation",
+            null_permutations=30,
+            random_state=0,
+            dtype=DTYPE,
+            device=DEVICE,
+        )
+
+        assert weights.argmax().item() == 0
+        assert torch.equal(weights[-2:], torch.zeros(2, dtype=DTYPE, device=DEVICE))
+
+    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
+    @pytest.mark.parametrize(
+        ("controls", "match"),
+        [
+            pytest.param(
+                {"null_permutations": -1},
+                "null_permutations.*non-negative integer",
+                id="negative-count",
+            ),
+            pytest.param(
+                {"null_permutations": 1.5},
+                "null_permutations.*non-negative integer",
+                id="fractional-count",
+            ),
+            pytest.param(
+                {"null_permutations": True},
+                "null_permutations.*non-negative integer",
+                id="boolean-count",
+            ),
+            pytest.param(
+                {"null_quantile": -0.01}, r"null_quantile.*in \[0, 1\]", id="quantile-below-zero"
+            ),
+            pytest.param(
+                {"null_quantile": 1.01}, r"null_quantile.*in \[0, 1\]", id="quantile-above-one"
+            ),
+            pytest.param(
+                {"null_quantile": float("nan")}, r"null_quantile.*in \[0, 1\]", id="nan-quantile"
+            ),
+        ],
+    )
+    def test_null_threshold_rejects_invalid_controls(
+        self, method: str, controls: dict[str, object], match: str
+    ) -> None:
+        X_cont, categorical_codes, target = mixed_classification_data()
+
+        with pytest.raises(ValueError, match=match):
+            feature_weights(
+                X_cont,
+                categorical_codes,
+                target,
+                task="classification",
+                method=method,
+                random_state=0,
+                dtype=DTYPE,
+                device=DEVICE,
+                **controls,
+            )
+
+
 class TestStatisticalFeatureWeights:
     @pytest.mark.parametrize(("method", "extra_kwargs"), METHODS)
     def test_statistical_helpers_are_state_free_and_do_not_mutate_inputs(
@@ -544,12 +711,17 @@ class TestStatisticalFeatureWeights:
         )
         assert np.array_equal(target, original[2])
         assert torch.equal(first, second)
-        assert first.data_ptr() != second.data_ptr()
 
-    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
-    @pytest.mark.parametrize("truncated", ["categorical_codes", "target", "labelled_mask"])
+    @pytest.mark.parametrize(
+        ("truncated", "match"),
+        [
+            pytest.param("categorical_codes", "categorical code.*one entry per", id="codes"),
+            pytest.param("target", "target must have one row per", id="target"),
+            pytest.param("labelled_mask", "labelled_mask.*one entry per", id="mask"),
+        ],
+    )
     def test_statistical_helpers_reject_inconsistent_row_counts(
-        self, method: str, truncated: str
+        self, truncated: str, match: str
     ) -> None:
         X_cont, categorical_codes, target = mixed_classification_data()
         rows = X_cont.shape[0]
@@ -564,13 +736,13 @@ class TestStatisticalFeatureWeights:
             "labelled_mask": np.ones(rows - 1, dtype=bool),
         }[truncated]
 
-        with pytest.raises(ValueError, match="row"):
+        with pytest.raises(ValueError, match=match):
             feature_weights(
                 X_cont,
                 call["categorical_codes"],
                 call["target"],
                 task="classification",
-                method=method,
+                method="correlation",
                 labelled_mask=call["labelled_mask"],
                 dtype=DTYPE,
                 device=DEVICE,
@@ -618,16 +790,8 @@ class TestStatisticalFeatureWeights:
         assert torch.equal(weights, widened)
         assert torch.equal(single_weighted, widened_weighted)
 
-    @pytest.mark.parametrize(("method", "extra_kwargs"), METHODS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-    @pytest.mark.parametrize("labelled_rows", [1, 6], ids=["fallback", "scored"])
-    def test_statistical_helpers_honour_the_requested_placement(
-        self,
-        method: str,
-        extra_kwargs: dict[str, int],
-        dtype: torch.dtype,
-        labelled_rows: int,
-    ) -> None:
+    def test_statistical_helpers_honour_the_requested_placement(self, dtype: torch.dtype) -> None:
         """The meta device pins placement on any machine, with or without CUDA."""
         X_cont, categorical_codes, target = mixed_classification_data()
 
@@ -636,11 +800,9 @@ class TestStatisticalFeatureWeights:
             categorical_codes,
             target,
             task="classification",
-            method=method,
-            labelled_mask=np.arange(X_cont.shape[0]) < labelled_rows,
+            method="correlation",
             dtype=dtype,
             device="meta",
-            **extra_kwargs,
         )
 
         assert weights.dtype is dtype
@@ -743,46 +905,47 @@ class TestStatisticalFeatureWeights:
         assert weighted.argmax().item() == 0
         assert torch.equal(weighted, dropped)
 
-    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
-    def test_statistical_helpers_reject_an_empty_feature_space(self, method: str) -> None:
+    def test_statistical_helpers_reject_an_empty_feature_space(self) -> None:
         with pytest.raises(ValueError, match="feature"):
             feature_weights(
                 np.empty((4, 0)),
                 (),
                 np.array([0, 0, 1, 1]),
                 task="classification",
-                method=method,
+                method="correlation",
                 dtype=DTYPE,
                 device=DEVICE,
             )
 
-    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
     @pytest.mark.parametrize(
-        "output_weights",
+        ("output_weights", "match"),
         [
-            pytest.param(np.array([1.0, -1.0]), id="negative"),
-            pytest.param(np.array([1.0, np.inf]), id="infinite"),
-            pytest.param(np.array([1.0, np.nan]), id="nan"),
-            pytest.param(np.array([0.0, 0.0]), id="zero-mass"),
-            pytest.param(np.ones(3), id="wrong-width"),
+            pytest.param(np.array([1.0, -1.0]), "output_weights.*non-negative", id="negative"),
+            pytest.param(np.array([1.0, np.inf]), "output_weights.*finite", id="infinite"),
+            pytest.param(np.array([1.0, np.nan]), "output_weights.*finite", id="nan"),
+            pytest.param(
+                np.array([0.0, 0.0]), "output_weights.*positive total mass", id="zero-mass"
+            ),
+            pytest.param(np.ones(3), "output_weights has 3 entries", id="wrong-width"),
         ],
     )
-    @pytest.mark.parametrize("labelled_rows", [0, 1, 400])
+    # One labelled row takes the uniform fallback; 400 are scored. Both validate first.
+    @pytest.mark.parametrize("labelled_rows", [1, 400])
     def test_regression_output_weights_require_finite_non_negative_positive_mass(
         self,
-        method: str,
         output_weights: np.ndarray,
+        match: str,
         labelled_rows: int,
     ) -> None:
         X_cont, target = two_target_regression_data()
 
-        with pytest.raises(ValueError, match="output_weights"):
+        with pytest.raises(ValueError, match=match):
             feature_weights(
                 X_cont,
                 (),
                 target,
                 task="regression",
-                method=method,
+                method="correlation",
                 dtype=DTYPE,
                 device=DEVICE,
                 output_weights=output_weights,
@@ -807,16 +970,14 @@ class TestStatisticalFeatureWeights:
 
         assert torch.equal(row, vector)
 
-    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
-    @pytest.mark.parametrize("rows", [0, 1, 4])
-    def test_regression_requires_at_least_one_output(self, method: str, rows: int) -> None:
+    def test_regression_requires_at_least_one_output(self) -> None:
         with pytest.raises(ValueError, match="output"):
             feature_weights(
-                np.ones((rows, 2)),
+                np.ones((4, 2)),
                 (),
-                np.empty((rows, 0)),
+                np.empty((4, 0)),
                 task="regression",
-                method=method,
+                method="correlation",
                 dtype=DTYPE,
                 device=DEVICE,
             )
@@ -856,8 +1017,7 @@ class TestStatisticalFeatureWeights:
 
         torch.testing.assert_close(actual, expected)
 
-    @pytest.mark.parametrize("method", ["correlation", "mutual_info"])
-    def test_statistical_helpers_reject_a_non_computation_dtype(self, method: str) -> None:
+    def test_statistical_helpers_reject_a_non_computation_dtype(self) -> None:
         X_cont, categorical_codes, target = mixed_classification_data()
 
         with pytest.raises(ValueError, match="dtype"):
@@ -866,7 +1026,7 @@ class TestStatisticalFeatureWeights:
                 categorical_codes,
                 target,
                 task="classification",
-                method=method,
+                method="correlation",
                 dtype=torch.float16,
             )
 

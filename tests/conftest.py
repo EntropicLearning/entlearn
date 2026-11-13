@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import warnings
 
 import pytest
 import torch
@@ -10,6 +12,59 @@ import torch
 pytest_plugins = ("_fixtures",)
 
 pytest.register_assert_rewrite("_alloc")
+
+# A match= that spells out at least WHOLE_SHARE of a message of MIN_WORDS or more words
+# fails: it should name the offending value and the reason, so the wording can change.
+WHOLE_SHARE = 0.9
+MIN_WORDS = 6
+
+try:
+    from _pytest.raises import AbstractRaises, stringify_exception
+    from _pytest.recwarn import WarningsChecker
+
+    _check_match, _matches = AbstractRaises._check_match, WarningsChecker.matches
+except (ImportError, AttributeError) as error:
+    raise ImportError(
+        f"pytest {pytest.__version__} lacks the match hooks the whole-message guard in "
+        "tests/conftest.py wraps (written for pytest 9.1.1); update the guard"
+    ) from error
+
+
+def _literal_length(pattern: str) -> int:
+    """Count the characters a pattern spells out, ignoring regex syntax and wildcards."""
+    literal = re.sub(r"\\([^A-Za-z0-9])", r"\1", pattern)
+    return len(re.sub(r"\.\*\??|\.\+\??|\\S\+|\\s\+|\\d\+|\[[^]]*\][*+?]?|[\^$]", "", literal))
+
+
+def _require_partial_match(pattern: str | re.Pattern[str], message: str) -> None:
+    """Fail when the pattern spells out at least 90 % of a message of six or more words."""
+    pattern = getattr(pattern, "pattern", pattern)
+    words = len(re.findall(r"[A-Za-z]{2,}", message))
+    if words >= MIN_WORDS and _literal_length(pattern) / len(message) >= WHOLE_SHARE:
+        pytest.fail(
+            "match= spells out the whole message; match the offending value and the reason\n"
+            f"  pattern: {pattern!r}\n  message: {message!r}",
+            pytrace=False,
+        )
+
+
+def _checked_raise(self: AbstractRaises, e: BaseException) -> bool:
+    matched = _check_match(self, e)
+    if matched and self.match is not None:
+        _require_partial_match(self.match, stringify_exception(e, include_subexception_msg=False))
+    return matched
+
+
+def _checked_warning(self: WarningsChecker, warning: warnings.WarningMessage) -> bool:
+    matched = _matches(self, warning)
+    if matched and self.match_expr is not None:
+        _require_partial_match(self.match_expr, str(warning.message))
+    return matched
+
+
+_guard = pytest.MonkeyPatch()
+_guard.setattr(AbstractRaises, "_check_match", _checked_raise)
+_guard.setattr(WarningsChecker, "matches", _checked_warning)
 
 _DTYPE_FOR_DEVICE: dict[str, torch.dtype] = {
     "cpu": torch.float64,
@@ -74,6 +129,11 @@ DEVICE, DTYPE, _BACKEND_NOTE = _resolve_device_dtype()
 DEPTH, _DEPTH_NOTE = _resolve_depth()
 _FALLBACK_NOTE = "; ".join(note for note in (_BACKEND_NOTE, _DEPTH_NOTE) if note) or None
 
+# A fit with a fixed iteration budget (tol=0 or a short max_iter) is not meant to converge.
+FIXED_BUDGET = pytest.mark.filterwarnings("ignore:the solver:entlearn.ConvergenceWarning")
+# A small manifold fixture can start a cluster below its subspace rank; its basis is completed.
+RANK_DEFICIENT = pytest.mark.filterwarnings("ignore:manifold initialisation:UserWarning")
+
 
 def by_depth[T](minimal: T, standard: T, exhaustive: T) -> T:
     """Return the value for the active ``EON_TEST_DEPTH``; CI runs at ``standard``.
@@ -84,13 +144,10 @@ def by_depth[T](minimal: T, standard: T, exhaustive: T) -> T:
     return {"minimal": minimal, "standard": standard, "exhaustive": exhaustive}[DEPTH]
 
 
-# CUDA's atomic ``index_add_`` (categorical numerators, grouped means) is not bitwise
-# reproducible run to run, and the trajectory-identity contracts (resume, persistence,
-# transport) rely on PyTorch's native deterministic-algorithm setting, so the CUDA
-# lane always enforces it; the environment flag extends the tripwire to other devices.
-_DETERMINISTIC = DEVICE.type == "cuda" or os.environ.get(
-    "EON_TEST_DETERMINISTIC", ""
-).strip().lower() in {
+# Fits repeat bitwise run to run on every device without PyTorch's deterministic
+# algorithms, so the trajectory-identity contracts (resume, persistence, transport) run in
+# the default mode; the environment flag runs them under deterministic algorithms instead.
+_DETERMINISTIC = os.environ.get("EON_TEST_DETERMINISTIC", "").strip().lower() in {
     "1",
     "true",
     "yes",

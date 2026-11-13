@@ -7,9 +7,11 @@ the graph and scratch reused across block calculations.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import assert_never
 
 import torch
 
+from entlearn.network.blocks.classification import _ClassificationBlock
 from entlearn.network.blocks.hidden import _HiddenBlock
 from entlearn.network.blocks.regression import _RegressionBlock
 from entlearn.network.blocks.types import (
@@ -20,7 +22,6 @@ from entlearn.network.blocks.types import (
 )
 from entlearn.network.data import _StagedData
 from entlearn.primitives.geometry import mark_non_empty_clusters_
-from entlearn.primitives.normalise import _is_soft
 from entlearn.recipe import Connection, Recipe
 
 
@@ -28,18 +29,18 @@ from entlearn.recipe import Connection, Recipe
 class _Workspace:
     """Scratch shared by more than one block calculation.
 
-    T is the row count of this fit or query operation. Row-indexed buffers
-    have exactly T rows, only ``matrix`` may have more, to support output coordinates
-    when M > T. Cluster/output dimensions retain their allocated capacity after
-    pruning, so callers take views limited to the active clusters. A new query batch allocates
+    T is the row count of this fit or query operation and M the class count of a
+    classification head; a regression head keeps its output-sized scratch in its own cache.
+    Cluster dimensions keep their allocated size after pruning, so callers take
+    contiguous ``_scratch_view`` matrices of the active size. A new query batch allocates
     a workspace for its own T rather than reusing the training workspace.
     """
 
-    matrix: torch.Tensor  # (max(T, M), max(K, M)); the widest general-purpose scratch
+    matrix: torch.Tensor  # (T, max(K, M)); the widest general-purpose scratch
     log_matrix: torch.Tensor  # (T, max(K, M)); the log buffer of an entropy term
-    scratch_K: torch.Tensor  # (max(K, M),) cluster-indexed scratch, holds the masses
+    scratch_K: torch.Tensor  # (max(K, M),) cluster-indexed scratch
     scratch_T: torch.Tensor  # (T,) row-indexed scratch
-    row_keepdim: torch.Tensor  # (T, 1) the softmax slice maximum and normaliser
+    row_keepdim: torch.Tensor  # (T, 1) the read-out's row maximum, or the minimum
     row_indices: torch.Tensor  # (T, 1) int64, the argmin index
     non_empty: torch.Tensor  # (K,) bool, the prune's survivors by unweighted mass
     empty_clusters: torch.Tensor  # (K,) bool, a centroid update's empty clusters by Wt mass
@@ -51,16 +52,15 @@ class _Workspace:
         cls,
         rows: int,
         clusters: int,
-        outputs: int,
+        classes: int,
         *,
         dtype: torch.dtype,
         device: torch.device,
     ) -> _Workspace:
         """Allocate shared scratch for one operation."""
-        columns = max(clusters, outputs)
-        matrix_rows = max(rows, outputs)
+        columns = max(clusters, classes)
         return cls(
-            matrix=torch.empty(matrix_rows, columns, dtype=dtype, device=device),
+            matrix=torch.empty(rows, columns, dtype=dtype, device=device),
             log_matrix=torch.empty(rows, columns, dtype=dtype, device=device),
             scratch_K=torch.empty(columns, dtype=dtype, device=device),
             scratch_T=torch.empty(rows, dtype=dtype, device=device),
@@ -101,10 +101,28 @@ class _CompiledGraph:
         return block
 
     @property
+    def classes(self) -> int:
+        """Return the class count of a classification head, 0 for a regression head."""
+        match self.head:
+            case _ClassificationBlock() as head:
+                return head.output_width
+            case _RegressionBlock():
+                return 0
+            case unreachable:
+                assert_never(unreachable)
+
+    @property
     def terminal(self) -> Connection:
         """Return the connection into the head."""
         (connection,) = self.incoming[self.order[-1]]
         return connection
+
+    @property
+    def head_delta(self) -> float:
+        """Return the coupling strength into the head, which the build resolves from any ratio."""
+        delta = self.terminal.delta
+        assert delta is not None
+        return delta
 
     def affiliations(self, name: str) -> torch.Tensor:
         """Return a clustering block's fitted affiliations."""
@@ -120,13 +138,6 @@ class _CompiledGraph:
     def source_affiliations(self, block: _OutputBlock) -> torch.Tensor:
         """Return the affiliations of the clustering block feeding an output head."""
         return self.affiliations(self.connection_into(block).source)
-
-    def resolve_affiliation_regimes(self) -> None:
-        """Resolve every block's regime from the current descriptions and dtype."""
-        dtype = self.input.continuous_centroids.dtype
-        for block in self.blocks.values():
-            if isinstance(block, _ClusteringBlock):
-                block.soft_assignments = _is_soft(block.description.epsilon, dtype)
 
     def accumulate_outgoing_cost_(
         self,
@@ -194,9 +205,7 @@ class _CompiledGraph:
         Network can hold geometry alone.
         """
         self.input.release_cache()
-        head = self.head
-        if isinstance(head, _RegressionBlock):
-            head.release_cache()
+        self.head.release_cache()
 
 
 @dataclass
@@ -206,41 +215,33 @@ class _FitSession:
     data: _StagedData
     graph: _CompiledGraph
     workspace: _Workspace
-    uniform_sample_weights: bool
+    uniform_weight: float | None  # the sample weight every row shares, else None
+    log_relative_weights: torch.Tensor | None  # (T,) log(T·w); None if uniform
     warning_messages: list[str]
+    offset: float = 0.0  # offset of the last loss
 
     @classmethod
     def open(
         cls,
         graph: _CompiledGraph,
         data: _StagedData,
-        *,
-        capacities: dict[str, int] | None = None,
     ) -> _FitSession:
         """Stage every block cache and the shared workspace, and fill the input cache.
 
-        ``capacities`` maps a clustering block's name to the cluster count its scratch is
-        sized for. A block without one takes its active count. A continued fit passes the
-        original counts, so its views after a prune keep the uninterrupted fit's strides.
         Everything a coordinate step reuses is allocated here, outside any step.
         """
-        capacity = {} if capacities is None else capacities
-        graph.input.stage_cache_(data, capacity=capacity.get(graph.order[0]))
-        head = graph.head
-        if isinstance(head, _RegressionBlock):
-            head.stage_cache_(data, capacity=capacity.get(graph.terminal.source))
+        graph.input.stage_cache_(data)
+        graph.head.stage_cache_(data)
         weights = data.sample_weights
         workspace = _Workspace.allocate(
             data.X_cont.shape[0],
-            max(
-                capacity.get(name, block.K)
-                for name, block in graph.blocks.items()
-                if isinstance(block, _ClusteringBlock)
-            ),
-            data.schema.M,
+            max(block.K for block in graph.blocks.values() if isinstance(block, _ClusteringBlock)),
+            graph.classes,
             dtype=data.X_cont.dtype,
             device=data.X_cont.device,
         )
-        session = cls(data, graph, workspace, bool(weights.max() == weights.min()), [])
+        uniform = float(weights[0]) if bool(weights.max() == weights.min()) else None
+        log_relative = None if uniform is not None else torch.log(weights * weights.shape[0])
+        session = cls(data, graph, workspace, uniform, log_relative, [])
         graph.input.prepare_cache_(session)
         return session

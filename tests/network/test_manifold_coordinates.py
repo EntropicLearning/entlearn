@@ -3,7 +3,7 @@
 import pytest
 import torch
 from _alloc import assert_zero_alloc
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, RANK_DEFICIENT
 from network._fixtures import assert_non_increasing, materialise
 
 from entlearn import ClassificationHead, Coupling, Hidden, ManifoldInput, Recipe, RegressionHead
@@ -13,6 +13,7 @@ from entlearn.network.fit import _loss
 
 
 class TestManifoldCoordinates:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
     @pytest.mark.parametrize("epsilon", [0.0, 0.2])
@@ -40,10 +41,8 @@ class TestManifoldCoordinates:
         session = materialise(recipe, X, y, sample_weights=weights, seed=9, warmup=2)
         block = session.graph.input
         before = _loss(session)
-        session.graph.accumulate_outgoing_cost_(block, block.live_cache.disc_cost, session)
         inp.update_affiliations_(block, session)
         inp.prune_(block, session)
-        mfld.refresh_cache_(block, session)
         after = _loss(session)
         assert_non_increasing(before, after, "input affiliation")
         for coordinate in (

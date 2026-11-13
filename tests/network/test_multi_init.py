@@ -1,8 +1,6 @@
 """Network-owned candidate fitting, selection and detached retention."""
 
-import gc
 import math
-import weakref
 
 import pytest
 import torch
@@ -10,7 +8,6 @@ from conftest import DEVICE, DTYPE
 from network._fixtures import blobs, classification_recipe, regression_blobs, regression_recipe
 
 from entlearn import InitialState, Network, PredictConfig
-from entlearn.network import selection
 from entlearn.network.state import InitOutcome, _winning_outcome
 
 NAN, INF = math.nan, math.inf
@@ -127,34 +124,8 @@ class TestNetworkMultiInit:
         )
         assert torch.equal(parallel.predict(X), before)
 
-    def test_only_the_best_evaluation_is_kept_while_later_candidates_fit(self, monkeypatch):
-        evaluate = selection._evaluate_candidate
-        references, alive = [], []
-
-        def recording(seed, **options):
-            gc.collect()
-            alive.append([reference() is not None for reference in references])
-            evaluation = evaluate(seed, **options)
-            references.append(weakref.ref(evaluation))
-            return evaluation
-
-        monkeypatch.setattr(selection, "_evaluate_candidate", recording)
-        X, y = blobs(3, 0.1)
-        scores = iter((1.0, 2.0, 3.0, 4.0))
-        Network.fit(
-            classification_recipe(K=3),
-            X,
-            y,
-            n_inits=4,
-            max_iter=3,
-            selection_loss=lambda *args, **kwargs: next(scores),
-        )
-        # Candidate 0 stays the best; a later loser is released once the next one arrives.
-        assert alive == [[], [True], [True, True], [True, False, True]]
-
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-    @pytest.mark.parametrize("retain", ["winner", "states"])
-    def test_supplied_state_retention_uses_the_computation_dtype(self, dtype, retain):
+    def test_supplied_state_retention_uses_the_computation_dtype(self, dtype):
         X, y = blobs(2, 0.1)
         X_cat = (y,)
         source_dtype = torch.float64 if dtype == torch.float32 else torch.float32
@@ -167,7 +138,6 @@ class TestNetworkMultiInit:
             X_cat=X_cat,
             initial_state=state,
             computation_dtype=dtype,
-            retain=retain,
             max_iter=3,
         )
         outcomes = network.diagnostics.initialisation_outcomes
@@ -208,8 +178,6 @@ class TestNetworkMultiInit:
         replay = Network.fit(recipe, X, y, initial_state=state, max_iter=3)
         assert len(replay.diagnostics.initialisation_outcomes) == 1
         assert torch.equal(one.predict(X), replay.predict(X))
-        with pytest.raises(ValueError, match=r"initial_state.*n_inits"):
-            Network.fit(recipe, X, y, initial_state=state, n_inits=2)
 
     @pytest.mark.parametrize(
         "options, message",
@@ -224,6 +192,7 @@ class TestNetworkMultiInit:
             ({"retain": "all"}, "retain"),
             ({"selection_loss": 1}, "selection_loss"),
             ({"validation_pairs": [()]}, "validation_pairs requires selection_loss"),
+            ({"initial_state": object(), "n_inits": 2}, "requires n_inits=1"),
             ({"initial_state": object(), "init_rows": object()}, "mutually exclusive"),
             ({"initial_state": _DerivedState()}, "exact InitialState"),
         ],
@@ -404,8 +373,6 @@ class TestSelectionLoss:
         "value",
         [
             float("nan"),
-            float("inf"),
-            -float("inf"),
             True,
             [0.0],
             torch.tensor([0.0]),

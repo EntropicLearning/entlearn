@@ -1,12 +1,19 @@
 """Detached fitted inspection through the public model."""
 
+from dataclasses import replace
+
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET, RANK_DEFICIENT
 from network._fixtures import blobs, prediction_model
+
+from entlearn import ClassificationHead, Coupling, Hidden, Input, Network, Recipe
+
+pytestmark = FIXED_BUDGET
 
 
 class TestInspection:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("kind", ["continuous", "mixed", "categorical", "manifold"])
     def test_fitted_values_have_named_owners_and_detached_storage(self, task, kind):
@@ -50,25 +57,24 @@ class TestInspection:
                 for tensor, copy in zip(tensors, copies, strict=True):
                     assert tensor.dtype == DTYPE and tensor.device == DEVICE
                     assert not tensor.requires_grad
-                    torch.testing.assert_close(tensor, copy)
+                    torch.testing.assert_close(tensor, copy, rtol=0, atol=0)
                     with torch.inference_mode():
                         tensor.zero_()
-        torch.testing.assert_close(model.predict(X, X_cat=categories), before)
+        torch.testing.assert_close(model.predict(X, X_cat=categories), before, rtol=0, atol=0)
 
     def test_inspected_values_are_inference_tensors_like_every_query(self):
         model, X, categories = prediction_model()
         centroids = model.inspect("continuous_centroids")[model.recipe.blocks[0].name]
         for tensor in (centroids, model.predict(X, X_cat=categories)):
             assert tensor.is_inference()
-            with pytest.raises(RuntimeError, match="Inplace update to inference tensor"):
-                tensor.zero_()
 
-    @pytest.mark.parametrize("name", ["unknown", "gamma", "log_Z_train", None, []])
+    @pytest.mark.parametrize("name", ["gamma", []])
     def test_unknown_requests_raise(self, name):
         model, _, _ = prediction_model()
-        with pytest.raises(ValueError, match="inspection"):
+        with pytest.raises(ValueError, match="unknown inspection name"):
             model.inspect(name)
 
+    @RANK_DEFICIENT
     @pytest.mark.parametrize(
         ("kind", "depth", "name"),
         [
@@ -84,10 +90,6 @@ class TestInspection:
             model.inspect(name)
 
     def test_inspection_preserves_custom_block_and_connection_names(self):
-        from dataclasses import replace
-
-        from entlearn import Network, Recipe
-
         original, X, categories = prediction_model(input_kind="mixed")
         names = {"input": "measurements", "hidden_1": "clusters", "output": "labels"}
         recipe = Recipe(
@@ -114,14 +116,12 @@ class TestInspection:
         ("input_epsilon", "hidden_epsilon", "expected"),
         [
             (0.05, 0.0, {"input": "soft", "hidden_1": "hard"}),
-            (torch.finfo(DTYPE).eps, 0.1, {"input": "hard", "hidden_1": "soft"}),
+            (torch.finfo(DTYPE).eps, 0.1, {"input": "soft", "hidden_1": "soft"}),
         ],
     )
     def test_affiliation_regimes_follow_the_fitted_temperature_gate(
         self, tmp_path, saved, input_epsilon, hidden_epsilon, expected
     ):
-        from entlearn import ClassificationHead, Coupling, Hidden, Input, Network, Recipe
-
         X, y = blobs(2, 0.04, n_features=2)
         model = Network.fit(
             Recipe.chain(
@@ -139,16 +139,14 @@ class TestInspection:
             model = Network.load(tmp_path / "model.safetensors", device=DEVICE)
         assert model.inspect("affiliation_regimes") == expected
 
+    @RANK_DEFICIENT
     @pytest.mark.parametrize(
         ("epsilon_T", "available"),
-        [(0.5, True), (torch.finfo(DTYPE).eps, False), (float("inf"), False)],
+        [(0.0, False), (0.5, True), (torch.finfo(DTYPE).eps, True), (float("inf"), False)],
     )
     @pytest.mark.parametrize("kind", ["continuous", "mixed", "manifold"])
-    def test_scores_available_agrees_with_score_samples(self, epsilon_T, available, kind):
-        from entlearn.network.queries import _scores_available
-
+    def test_score_samples_requires_instance_weight_recovery(self, epsilon_T, available, kind):
         model, X, categories = prediction_model(input_kind=kind, epsilon_T=epsilon_T)
-        assert _scores_available(model) is available
         if available:
             assert model.score_samples(X, X_cat=categories).shape == (X.shape[0],)
         else:

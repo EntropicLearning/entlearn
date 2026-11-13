@@ -21,9 +21,9 @@ def update_theta_(
     """Set ``theta`` to the normalised co-occurrence of target and source affiliations.
 
     Computes ``θ ← normalise(Γ_targetᵀ @ Γ_source, norm_dim)`` in place and refreshes
-    ``log_theta = log(max(θ, eps))``. ``sample_weights``, if given, weights the source
-    affiliations first; ``pseudocount`` adds a constant ``a`` to every count, giving
-    ``(counts + a)/(slicesum + N·a)`` with ``N = theta.shape[norm_dim]``.
+    ``log_theta = log(max(θ, tiny))`` (:func:`floored_log_`). ``sample_weights``, if given,
+    weights the source affiliations first. ``pseudocount`` adds a constant ``a`` to every
+    count, giving ``(counts + a)/(slicesum + N·a)`` with ``N = theta.shape[norm_dim]``.
 
     ``norm_dim`` picks the axis that sums to one: ``0`` normalises columns,
     ``1`` normalises rows. A slice with no mass becomes uniform.

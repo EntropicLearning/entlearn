@@ -6,7 +6,10 @@ from collections.abc import Sequence
 
 import torch
 
-from entlearn.primitives.normalise import _eps, floored_log_
+from entlearn.primitives.normalise import _scratch_view, _tiny
+
+# Row batches of a one-hot product: enough independent products to occupy a GPU
+_ONE_HOT_BATCHES = 256
 
 
 def compute_wd_cost_euclidean_(
@@ -76,6 +79,7 @@ def compute_wd_cost_categorical_(
     scratch_KM: torch.Tensor,
     *,
     need_cost: bool = True,
+    code_scratch: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Write each categorical feature's discretisation error into ``Wd_cost_slice_cat``.
 
@@ -85,9 +89,9 @@ def compute_wd_cost_categorical_(
         cat_numerator_i[m, k] = Σ_t X̃_i[m, t]·gamma_wt[t, k]
         Wd_cost_slice_cat[i]  = -combined_scales[i]·Σ_{k,m} logC_cat_i[k,m]·cat_numerator_i[m,k]
 
-    A feature given as ``(T,)`` integer codes builds its numerator by scatter-add
-    rather than by a matmul against a dense one-hot matrix; a ``(T, M_d)`` feature uses
-    the matmul. Elements of ``Wd_cost_slice_cat`` are overwritten.
+    A feature given as ``(T,)`` integer codes builds its numerator by scatter-add, or by
+    ``_sum_by_code_`` when ``code_scratch`` is given; a ``(T, M_d)`` feature uses a matmul.
+    Elements of ``Wd_cost_slice_cat`` are overwritten.
 
     Also leaves every ``cat_numerator_i`` populated for the categorical centroid update.
 
@@ -99,28 +103,61 @@ def compute_wd_cost_categorical_(
         logC_cat_list: Per feature, ``(K, M_d)`` log of the categorical centroids.
         combined_scales: ``(D_cat,)`` per-feature scaling coefficients, independent of
             ``Wd``.
-        cat_numerator_list: Per feature, an ``(M_d, K_max)`` output whose leading
-            active columns are overwritten with ``X̃_iᵀ @ gamma_wt``.
-        scratch_KM: ``(K, max_d M_d)`` workspace.
+        cat_numerator_list: Per feature, a contiguous ``(M_d, K_max)`` output whose first
+            ``M_d·K`` elements are overwritten with ``X̃_iᵀ @ gamma_wt`` as an ``(M_d, K)``
+            matrix.
+        scratch_KM: contiguous ``(K_max, max_d M_d)`` workspace.
         need_cost: ``False`` computes only ``cat_numerator_list`` and leaves
             ``Wd_cost_slice_cat`` untouched. Pass it when ``Wd`` is frozen.
+        code_scratch: The ``(T, max_d M_d)`` and ``(_ONE_HOT_BATCHES·max_d M_d·K_max,)``
+            workspaces of ``_sum_by_code_``, which then replaces the scatter-add, whose
+            atomic adds on CUDA vary from run to run.
     """
     K = gamma_wt.shape[1]
-    for X_i, numerator, logC_i, scale_i, slice_i in zip(
-        X_cat, cat_numerator_list, logC_cat_list, combined_scales, Wd_cost_slice_cat, strict=True
-    ):
-        num_i = numerator[:, :K]
-        if X_i.dim() == 1:  # fast path: one-hot scatter-add
-            num_i.zero_()
-            num_i.index_add_(0, X_i, gamma_wt)  # num_i[code_t] += gamma_wt[t]
-        else:  # matrix path
+    numerators = [_scratch_view(numerator, K) for numerator in cat_numerator_list]
+    coded = [num_i for X_i, num_i in zip(X_cat, numerators, strict=True) if X_i.dim() == 1]
+    if coded and code_scratch is None:
+        torch._foreach_zero_(coded)  # the scatter-add accumulates
+    features = zip(X_cat, numerators, logC_cat_list, Wd_cost_slice_cat, strict=True)
+    for X_i, num_i, logC_i, slice_i in features:
+        if X_i.dim() == 2:  # matrix path
             torch.mm(X_i.transpose(0, 1), gamma_wt, out=num_i)  # X̃ᵀ @ gamma_wt
+        elif code_scratch is None:  # one-hot scatter-add
+            num_i.index_add_(0, X_i, gamma_wt)  # num_i[code_t] += gamma_wt[t]
+        else:
+            _sum_by_code_(num_i, X_i, gamma_wt, *code_scratch)
         if not need_cost:
             continue  # Wd frozen: the numerator above is the only output the caller consumes
-        view = scratch_KM[:, : logC_i.shape[1]]  # (K, M_d)
+        view = _scratch_view(scratch_KM, logC_i.shape[1], K)  # (K, M_d)
         torch.mul(logC_i, num_i.transpose(0, 1), out=view)  # logC ∘ numᵀ
         torch.sum(view, dim=(0, 1), out=slice_i)  # ⟨logC, numᵀ⟩_F -> output element
-        slice_i.mul_(scale_i).neg_()  # times -combined_scales[i]
+    if need_cost:
+        Wd_cost_slice_cat.mul_(combined_scales).neg_()  # times -combined_scales
+
+
+def _sum_by_code_(
+    out: torch.Tensor,
+    codes: torch.Tensor,
+    values: torch.Tensor,
+    scratch_TM: torch.Tensor,
+    scratch_BMK: torch.Tensor,
+) -> None:
+    """Write ``out[m] = Σ_{t: codes[t] = m} values[t]``, adding in the same order on every run.
+
+    One-hot rows times ``values``, one product per row batch, then the batch products summed.
+    """
+    M, K = out.shape
+    rows = codes.shape[0] // _ONE_HOT_BATCHES
+    head = rows * _ONE_HOT_BATCHES
+    one_hot = _scratch_view(scratch_TM, M).zero_().scatter_(1, codes.unsqueeze(1), 1.0)
+    products = scratch_BMK[: _ONE_HOT_BATCHES * M * K].view(_ONE_HOT_BATCHES, M, K)
+    torch.bmm(
+        one_hot[:head].view(_ONE_HOT_BATCHES, rows, M).transpose(1, 2),
+        values[:head].view(_ONE_HOT_BATCHES, rows, K),
+        out=products,
+    )
+    torch.sum(products, dim=0, out=out)
+    out.addmm_(one_hot[head:].T, values[head:])  # the rows after the last whole batch
 
 
 def update_euclidean_centroids_(
@@ -132,25 +169,18 @@ def update_euclidean_centroids_(
     """Set the continuous centroids to ``C ← centroid_numerator / denom``.
 
     ``C_out[k, :]`` becomes the weighted mean of cluster ``k``'s instances. A cluster
-    whose mass ``denom[k]`` is at or below ``finfo(dtype).eps`` counts as empty and is
-    zeroed instead.
-
-    ``C_out`` must not overlap the numerator or denominator: it briefly holds the
-    protected divisors. The shared denominator remains unchanged.
+    with mass at or below ``finfo(dtype).tiny`` counts as empty and is zeroed instead.
+    ``C_out`` may alias ``centroid_numerator``.
 
     Args:
         C_out: ``(K, D)`` output, overwritten.
         centroid_numerator: ``(K, D)`` weighted sum ``gamma_wtᵀ @ X``, as left by
             :func:`compute_wd_cost_euclidean_`.
-        denom: ``(K,)`` per-cluster mass ``Σ_t gamma_wt[t, k]``.
+        denom: ``(K,)`` per-cluster mass ``Σ_t gamma_wt[t, k]``, read-only.
         empty: ``(K,)`` bool workspace, overwritten with the empty-cluster mask.
     """
-    eps = _eps(C_out.dtype)
-    torch.le(denom, eps, out=empty)  # empty clusters
-    # Reuse the destination for safe divisors; the shared masses remain read-only.
-    C_out.copy_(denom.unsqueeze(1))
-    C_out.masked_fill_(empty.unsqueeze(1), 1.0)
-    torch.div(centroid_numerator, C_out, out=C_out)
+    torch.le(denom, _tiny(C_out.dtype), out=empty)  # empty clusters
+    torch.div(centroid_numerator, denom.unsqueeze(1), out=C_out)  # replaced below where empty
     C_out.masked_fill_(empty.unsqueeze(1), 0.0)  # zero empty clusters
 
 
@@ -179,34 +209,34 @@ def compute_gamma_wt_(
 
 
 def update_categorical_centroids_(
-    C_cat_i: torch.Tensor,
-    logC_cat_i: torch.Tensor,
-    cat_numerator_i: torch.Tensor,
+    C_cat: tuple[torch.Tensor, ...],
+    logC_cat: tuple[torch.Tensor, ...],
+    cat_numerators: Sequence[torch.Tensor],
     denom: torch.Tensor,
     empty: torch.Tensor,
 ) -> None:
-    """Set one categorical feature's centroid distribution and refresh its log cache.
+    """Set every categorical feature's centroid distributions and refresh their log caches.
 
-    Writes ``C_cat_i[k, m] = cat_numerator_i[m, k] / denom[k]``, so every row is a
-    distribution over the feature's ``M_d`` categories, then refreshes
-    ``logC_cat_i = log(max(C_cat_i, eps))``. A cluster whose mass ``denom[k]`` is at or
-    below ``finfo(dtype).eps`` counts as empty and takes the uniform ``1 / M_d``.
+    For each feature ``i``, writes ``C_cat_i[k, m] = cat_numerator_i[m, k] / denom[k]``, so
+    every row is a distribution over the feature's ``M_d`` categories, then refreshes
+    ``logC_cat_i = log(max(C_cat_i, tiny))``. A cluster
+    with mass at or below ``finfo(dtype).tiny`` counts as empty and takes the uniform ``1 / M_d``.
 
-    ``C_cat_i`` must not overlap the numerator or denominator, as it briefly holds the
-    protected divisors. The shared denominator remains unchanged.
+    There must be at least one feature.
 
     Args:
-        C_cat_i: ``(K, M_d)`` output, overwritten.
-        logC_cat_i: ``(K, M_d)`` output, overwritten with ``log(C_cat_i)``.
-        cat_numerator_i: ``(M_d, K)`` weighted counts ``X̃_iᵀ @ (Γ ∘ Wt)``.
-        denom: ``(K,)`` per-cluster mass ``Σ_t gamma_wt[t, k]``.
+        C_cat: Per feature, a ``(K, M_d)`` output, overwritten.
+        logC_cat: Per feature, a ``(K, M_d)`` output, overwritten with ``log(C_cat_i)``.
+        cat_numerators: Per feature, the ``(M_d, K)`` weighted counts ``X̃_iᵀ @ (Γ ∘ Wt)``.
+        denom: ``(K,)`` per-cluster mass ``Σ_t gamma_wt[t, k]``, read-only.
         empty: ``(K,)`` bool workspace, overwritten with the empty-cluster mask.
     """
-    eps = _eps(C_cat_i.dtype)
-    uniform = 1.0 / C_cat_i.shape[1]  # 1 / M_d
-    torch.le(denom, eps, out=empty)  # empty cluster
-    C_cat_i.copy_(denom.unsqueeze(1))
-    C_cat_i.masked_fill_(empty.unsqueeze(1), 1.0)
-    torch.div(cat_numerator_i.transpose(0, 1), C_cat_i, out=C_cat_i)
-    C_cat_i.masked_fill_(empty.unsqueeze(1), uniform)
-    floored_log_(logC_cat_i, C_cat_i)  # cache log(C_cat_i)
+    tiny = _tiny(denom.dtype)
+    torch.le(denom, tiny, out=empty)  # empty clusters
+    for C_i, numerator_i in zip(C_cat, cat_numerators, strict=True):
+        torch.div(numerator_i.transpose(0, 1), denom.unsqueeze(1), out=C_i)
+        C_i.masked_fill_(empty.unsqueeze(1), 1.0 / C_i.shape[1])  # 1 / M_d where empty
+    # log(max(C_cat_i, tiny)), as floored_log_ writes it, for every feature at once
+    torch._foreach_copy_(logC_cat, C_cat)
+    torch._foreach_clamp_min_(logC_cat, tiny)
+    torch._foreach_log_(logC_cat)

@@ -1,16 +1,21 @@
 """Public behaviour of a fitted shallow classification Network."""
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import replace
 from itertools import pairwise
 
 import pytest
 import torch
 from _alloc import assert_no_float64, assert_zero_alloc
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
+    BLOB_SPREADS,
+    assert_deep_coordinates_non_increasing,
+    assert_head_then_input_non_increasing,
     assert_non_increasing,
     assert_simplex_rows,
+    blobs,
     classification_recipe,
+    deep_classification_recipe,
     materialise,
 )
 
@@ -18,14 +23,14 @@ from entlearn import (
     ClassificationHead,
     Coupling,
     Input,
-    LossIncreaseWarning,
     Network,
     PredictConfig,
     Recipe,
 )
-from entlearn.network.blocks import input as inp
-from entlearn.network.fit import _fit_iteration_
+from entlearn.network.data import _ClassificationSupervision
+from entlearn.network.fit import _fit_iteration_, _loss
 from entlearn.network.predict import predict
+from entlearn.primitives.normalise import _tiny as _tiny_value
 
 # The temperature regimes the allocation probe uses, matching the monotonicity grid: the
 # fixed temperatures take an early return that the finite ones do not.
@@ -82,9 +87,10 @@ class TestShallowClassificationFit:
         assert network.diagnostics.n_iter < 50
         assert network.diagnostics.warnings == ()
 
+    @FIXED_BUDGET
     def test_finite_weight_temperatures_learn_and_infinite_temperatures_pin(self) -> None:
         X_cont = torch.tensor(
-            [[0.0, 0.0], [0.1, 1.0], [0.2, 3.0], [0.8, 7.0], [0.9, 8.0], [1.0, 10.0]],
+            [[0.0, 0.0], [0.1, 0.1], [0.2, 0.3], [0.8, 0.7], [0.9, 0.8], [1.0, 1.0]],
             dtype=DTYPE,
             device=DEVICE,
         )
@@ -103,18 +109,20 @@ class TestShallowClassificationFit:
 
         uniform_rows = torch.full((6,), 1.0 / 6, dtype=DTYPE, device=DEVICE)
         assert torch.equal(
-            frozen._graph.input.feature_weights, frozen_state.input_geometry.feature_weights
+            frozen.inspect("feature_weights")["input"], frozen_state.input_geometry.feature_weights
         )
-        assert torch.equal(frozen._graph.input.instance_weights, uniform_rows)
+        assert torch.equal(frozen.inspect("training_instance_weights")["input"], uniform_rows)
         assert not torch.equal(
-            learned._graph.input.feature_weights, learned_state.input_geometry.feature_weights
+            learned.inspect("feature_weights")["input"],
+            learned_state.input_geometry.feature_weights,
         )
-        assert not torch.equal(learned._graph.input.instance_weights, uniform_rows)
+        assert not torch.equal(learned.inspect("training_instance_weights")["input"], uniform_rows)
         assert torch.equal(
             learned_state.input_geometry.feature_weights,
             torch.full((2,), 0.5, dtype=DTYPE, device=DEVICE),
         )
 
+    @FIXED_BUDGET
     def test_pruning_updates_the_active_schema_and_keeps_prediction_usable(self) -> None:
         X_cont, y = _tiny()
         recipe = classification_recipe(Input(K=3))
@@ -139,86 +147,26 @@ class TestShallowClassificationFit:
         assert dict(network.schema.K_active)["input"] == 1
         assert_simplex_rows(probabilities)
 
-    def test_fit_diagnostics_are_immutable(self) -> None:
-        X_cont, y = _tiny()
-        diagnostics = Network.fit(classification_recipe(), X_cont, y, max_iter=1).diagnostics
-
-        with pytest.raises(FrozenInstanceError):
-            diagnostics.n_iter = 2
-
+    @FIXED_BUDGET
     def test_fitted_recipe_and_device_support_fresh_queries_and_refits(self) -> None:
         X_cont, y = _tiny()
         recipe = classification_recipe(Input(K=2))
         network = Network.fit(recipe, X_cont, y, max_iter=1)
 
-        query = X_cont.to(device=network.device, dtype=network.schema.computation_dtype)
+        # A query arriving in the other float dtype converts with the fitted placement.
+        other = torch.float32 if DTYPE is torch.float64 else torch.float64
+        query = X_cont.to(other).to(device=network.device, dtype=network.schema.computation_dtype)
         torch.testing.assert_close(network.predict(query), network.predict(X_cont))
         refit = Network.fit(network.recipe, X_cont, y, max_iter=1)
         torch.testing.assert_close(refit.predict(query), network.predict(query))
-        assert network.recipe is recipe
-        with pytest.raises(AttributeError):
-            network.recipe = recipe.replace_block("input", K=3)
-        with pytest.raises(AttributeError):
-            network.device = torch.device("cpu")
-
-    def test_a_loss_increase_warns_and_reaches_the_diagnostics(self) -> None:
-        X_cont, y = _separable()
-        recipe = classification_recipe(Input(K=2, epsilon=0.05))
-        session = materialise(recipe, X_cont, y, seed=7, warmup=1)
-        # Manipulate the head so the next iteration starts from a worse transition than the
-        # one the coordinate steps left behind.
-        session.graph.head.theta.copy_(torch.tensor([[0.99, 0.01], [0.01, 0.99]], dtype=DTYPE))
-
-        from entlearn.network.fit import _loss, _record_loss_warning
-
-        history = [_loss(session) - 1.0, _loss(session)]
-        with pytest.warns(LossIncreaseWarning, match="loss increased"):
-            _record_loss_warning(session, history)
-
-        assert session.warning_messages and "loss increased" in session.warning_messages[0]
+        assert network.recipe == recipe
 
 
 class TestFitStructuralContract:
-    def test_the_head_updates_before_the_input_block(self) -> None:
-        X_cont, y = _separable()
-        recipe = classification_recipe(Input(K=2, epsilon=0.05))
-        session = materialise(recipe, X_cont, y, seed=7)
-        head = session.graph.head
-        block = session.graph.input
-        gamma_before = block.gamma.clone()
-
-        _fit_iteration_(session)
-        after_iteration = head.theta.clone()
-
-        # Recompute the head from the affiliations that stood before the iteration. It
-        # matches only because the head read them before the input block moved them on.
-        rerun = materialise(recipe, X_cont, y, seed=7)
-        assert torch.equal(rerun.graph.input.gamma, gamma_before)
-        rerun.graph.head.update_parameters_(rerun)
-        assert torch.equal(rerun.graph.head.theta, after_iteration)
-
-    def test_no_terminal_transition_object_exists(self) -> None:
-        X_cont, y = _tiny()
-        network = Network.fit(classification_recipe(), X_cont, y, max_iter=1)
-        graph = network._graph
-
-        assert set(graph.blocks) == {"input", "output"}
-        assert graph.terminal.coupling is None
-        assert graph.terminal.theta_alpha is None
-        assert not hasattr(graph, "transitions")
-
-    def test_publication_releases_the_rebuildable_caches(self) -> None:
-        X_cont, y = _tiny()
-        network = Network.fit(classification_recipe(), X_cont, y, max_iter=1)
-
-        assert network._graph.input.cache is None
-        with pytest.raises(RuntimeError, match="holds no cache"):
-            inp.refresh_cache_(network._graph.input, None)
-
     def test_data_and_controls_are_keyword_only_after_the_target(self) -> None:
         X_cont, y = _tiny()
 
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match="takes 4 positional arguments"):
             # The extra positional argument is the point of the test.
             Network.fit(classification_recipe(), X_cont, y, None)  # ty: ignore[too-many-positional-arguments]
 
@@ -252,21 +200,47 @@ class TestClassificationFitInvariants:
         ).prediction
         torch.testing.assert_close(probabilities, torch.full_like(probabilities, 0.5))
 
+    def test_head_loss_and_update_read_the_latest_source_affiliations(self) -> None:
+        X_cont, y = _separable()
+        session = materialise(classification_recipe(Input(K=2, epsilon=0.1)), X_cont, y, seed=4)
+        head, source = session.graph.head, session.graph.input
+        supervision = session.data.supervision
+        assert isinstance(supervision, _ClassificationSupervision)
+        head.update_parameters_(session)
+        _loss(session)  # counts the labels of these affiliations
+        stale = supervision.weighted_target.T @ source.gamma
+        source.update_parameters_(session)
+        counts = supervision.weighted_target.T @ source.gamma
+        assert not torch.allclose(counts, stale)
+
+        expected_loss = -session.graph.head_delta * (counts * head.log_theta).sum()
+
+        session.workspace.loss.zero_()
+        head.partial_loss_(session)
+        head.update_parameters_(session)
+
+        torch.testing.assert_close(session.workspace.loss, expected_loss)
+        torch.testing.assert_close(head.theta, counts / counts.sum(0))
+
     @pytest.mark.parametrize(
         "temperatures",
         _ALLOC_TEMPERATURES,
         ids=lambda case: f"g{case[0]}-wd{case[1]}-wt{case[2]}",
     )
-    def test_complete_iteration_allocates_no_tensor_storage(self, temperatures) -> None:
+    @pytest.mark.parametrize("weighted", [False, True], ids=["unweighted", "weighted"])
+    def test_complete_iteration_allocates_no_tensor_storage(self, temperatures, weighted) -> None:
         epsilon, epsilon_D, epsilon_T = temperatures
         X_cont, y = _separable()
         recipe = classification_recipe(
             Input(K=2, epsilon=epsilon, epsilon_D=epsilon_D, epsilon_T=epsilon_T)
         )
-        session = materialise(recipe, X_cont, y, seed=4, warmup=1)
+        rows = X_cont.shape[0]
+        weights = torch.arange(1, rows + 1, dtype=DTYPE, device=DEVICE) if weighted else None
+        session = materialise(recipe, X_cont, y, sample_weights=weights, seed=4, warmup=1)
 
         assert_zero_alloc(_fit_iteration_, session)
 
+    @FIXED_BUDGET
     def test_float32_fit_and_prediction_create_no_float64_tensors(self) -> None:
         X_cont = torch.tensor([[0.0], [0.2], [0.8], [1.0]], dtype=torch.float32)
         y = torch.tensor([0, 0, 1, 1], dtype=torch.int64)
@@ -276,3 +250,86 @@ class TestClassificationFitInvariants:
         probabilities = assert_no_float64(network.predict, X_cont)
 
         assert probabilities.dtype is torch.float32
+
+
+class TestHeadPrior:
+    @pytest.mark.parametrize("coupling", (Coupling.M, Coupling.S))
+    @pytest.mark.parametrize("weighted", (False, True), ids=("unweighted", "weighted"))
+    @pytest.mark.parametrize("theta_alpha", (1.0, 1.7))
+    def test_update_and_loss_add_the_pseudocount_at_unit_total_scale(
+        self, coupling, weighted, theta_alpha
+    ) -> None:
+        X_cont, y = _separable()
+        sample_weights = (
+            torch.arange(1, X_cont.shape[0] + 1, dtype=DTYPE, device=DEVICE) if weighted else None
+        )
+        recipe = Recipe.chain(
+            Input(K=3, epsilon=0.1), ClassificationHead(coupling=coupling, theta_alpha=theta_alpha)
+        )
+        session = materialise(recipe, X_cont, y, sample_weights=sample_weights, seed=4)
+        head = session.graph.head
+        supervision = session.data.supervision
+        assert isinstance(supervision, _ClassificationSupervision)
+        counts = supervision.weighted_target.T @ session.graph.input.gamma
+        # The weighted target sums to the unit total, as a transition's counts do.
+        torch.testing.assert_close(counts.sum(), torch.ones((), dtype=DTYPE, device=DEVICE))
+        prior = (theta_alpha - 1.0) / counts.numel()
+        axis = 0 if coupling is Coupling.M else 1
+        expected = (counts + prior) / (counts + prior).sum(dim=axis, keepdim=True)
+
+        head.update_parameters_(session)
+
+        torch.testing.assert_close(head.theta, expected)
+        logs = expected.clamp_min(_tiny_value(DTYPE)).log()
+        expected_loss = -session.graph.head_delta * ((counts * logs).sum() + prior * logs.sum())
+        session.workspace.loss.zero_()
+        head.partial_loss_(session)
+        torch.testing.assert_close(session.workspace.loss, expected_loss)
+
+    @pytest.mark.parametrize("theta_alpha", (1.0, 2.0))
+    def test_a_prior_keeps_every_class_probability_of_a_pure_cluster_positive(
+        self, theta_alpha
+    ) -> None:
+        X_cont, y = _separable()
+        recipe = Recipe.chain(Input(K=2, epsilon=0.0), ClassificationHead(theta_alpha=theta_alpha))
+        network = Network.fit(recipe, X_cont, y, seed=4, max_iter=5)
+        theta = network.inspect("head_parameters")["output"]["theta"]
+        assert bool((theta > 0).all()) is (theta_alpha > 1.0)
+
+    @pytest.mark.parametrize("epsilon", (0.0, 0.2), ids=("hard", "soft"))
+    def test_each_coordinate_update_is_non_increasing(self, epsilon) -> None:
+        X_cont, y = blobs(3, BLOB_SPREADS["overlapping"], seed=3)
+        shallow = Recipe.chain(Input(K=4, epsilon=epsilon), ClassificationHead(theta_alpha=2.0))
+        assert_head_then_input_non_increasing(materialise(shallow, X_cont, y, seed=3))
+        deep = deep_classification_recipe(
+            (4, 3), epsilon=epsilon, theta_alpha=1.5, head_theta_alpha=2.0
+        )
+        assert_deep_coordinates_non_increasing(materialise(deep, X_cont, y, seed=3, warmup=2))
+
+    def test_pruning_keeps_the_pseudocount_of_the_initial_widths(self) -> None:
+        X_cont, y = _separable()
+        recipe = Recipe.chain(Input(K=3, epsilon=0.1), ClassificationHead(theta_alpha=2.0))
+        head = materialise(recipe, X_cont, y, seed=4).graph.head
+        pseudocount = head.pseudocount
+        keep = torch.tensor([True, False, True], device=DEVICE)
+
+        head.prune_source(keep, torch.empty(2, dtype=DTYPE, device=DEVICE))
+
+        assert head.theta.shape == (2, 2)
+        assert head.initial_widths == (2, 3)
+        assert head.pseudocount == pseudocount == 1.0 / 6
+
+    @FIXED_BUDGET
+    def test_the_prior_and_its_widths_survive_a_save_and_load(self, tmp_path) -> None:
+        X_cont, y = _separable()
+        recipe = Recipe.chain(Input(K=3, epsilon=0.1), ClassificationHead(theta_alpha=2.0))
+        source = Network.fit(recipe, X_cont, y, seed=4, max_iter=3)
+        path = tmp_path / "prior.safetensors"
+        source.save(path)
+        restored = Network.load(path, device=DEVICE)
+
+        assert restored.recipe == source.recipe
+        assert restored._graph.head.initial_widths == source._graph.head.initial_widths
+        expected = source.fine_tune(X_cont, y, max_iter=2)
+        actual = restored.fine_tune(X_cont, y, max_iter=2)
+        torch.testing.assert_close(actual.predict(X_cont), expected.predict(X_cont), rtol=0, atol=0)

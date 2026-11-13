@@ -1,11 +1,17 @@
-"""Tests for the affiliation cost reductions (reductions.py)."""
+"""Tests for the reductions over the rows (reductions.py)."""
 
 import pytest
 import torch
 from _alloc import assert_zero_alloc
-from conftest import DTYPE
+from conftest import DEVICE, DTYPE
 
-from entlearn.primitives.reductions import compute_wt_cost_, reduce_input_cost_
+from entlearn.primitives.reductions import (
+    _CHUNK_ROWS,
+    _CUDA_MIN_CHUNKS,
+    _chunked_product_,
+    compute_wt_cost_,
+    reduce_input_cost_,
+)
 from primitives._fixtures import SEEDS, assert_close, empty, generator, rand, randn, stochastic
 
 REDUCE_SHAPES = [(7, 3), (10, 4), (6, 2), (5, 5)]  # (T, K)
@@ -93,3 +99,43 @@ class TestComputeWtCost:
         assert_zero_alloc(compute_wt_cost_, Wt_cost, gamma, sqdist_wd, cat_cost, scratch_TK)
         ref = _ref_wt_cost(gamma, sqdist_wd, cat_cost)
         assert_close(Wt_cost, ref)
+
+
+class TestChunkedProduct:
+    @pytest.mark.parametrize("rows", [_CHUNK_ROWS - 1, 3 * _CHUNK_ROWS + 5])
+    def test_matches_the_product_and_allocates_nothing(self, rows):
+        g = generator(SEEDS[0])
+        A, B = rand(rows, 3, g=g), stochastic(rows, 4, dim=1, g=g)
+        out, scratch = empty(3, 4), empty(rows * 12)
+        assert_zero_alloc(_chunked_product_, out, A, B, scratch)
+        assert_close(out, A.T @ B)
+
+    def test_a_scratch_too_small_for_the_chunks_takes_one_product(self):
+        g = generator(SEEDS[0])
+        A, B = rand(3 * _CHUNK_ROWS, 3, g=g), stochastic(3 * _CHUNK_ROWS, 4, dim=1, g=g)
+        out = empty(3, 4)
+        _chunked_product_(out, A, B, empty(2 * 12))  # room for two of the three chunk products
+        assert_close(out, A.T @ B)
+
+    @pytest.mark.parametrize("chunks", [3, _CUDA_MIN_CHUNKS])
+    def test_cuda_chunks_only_float32_products_of_many_chunks(self, chunks):
+        g = generator(SEEDS[0])
+        A, B = rand(chunks * _CHUNK_ROWS, 3, g=g), stochastic(chunks * _CHUNK_ROWS, 4, dim=1, g=g)
+        scratch = torch.full((chunks * 12,), torch.nan, dtype=DTYPE, device=DEVICE)
+        _chunked_product_(empty(3, 4), A, B, scratch)
+        one = DEVICE.type == "cuda" and (DTYPE is torch.float64 or chunks < _CUDA_MIN_CHUNKS)
+        assert bool(scratch.isnan().all()) == one
+
+    def test_float32_error_stays_near_that_of_one_chunk(self):
+        # One float32 product over these 400,000 rows is off by about 300 eps here; the
+        # pairwise sum of the chunk products adds only seven levels to one chunk's error.
+        g = torch.Generator(device=DEVICE).manual_seed(SEEDS[0])
+        A = torch.rand(400_000, 3, generator=g, dtype=torch.float64, device=DEVICE)
+        B = torch.rand(400_000, 4, generator=g, dtype=torch.float64, device=DEVICE)
+        B /= B.sum(1, keepdim=True)
+        out = torch.empty(3, 4, dtype=torch.float32, device=DEVICE)
+        scratch = torch.empty(400_000 * 12, dtype=torch.float32, device=DEVICE)
+        _chunked_product_(out, A.float(), B.float(), scratch)
+        reference = A.T @ B
+        error = ((out.double() - reference).abs() / reference).max()
+        assert error <= 64 * torch.finfo(torch.float32).eps

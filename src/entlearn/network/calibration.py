@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import torch
 
+from entlearn.network.validation import _all_finite
 from entlearn.primitives.normalise import _eps
 from entlearn.primitives.output import geometric_probabilities_, scale_logits_
 
@@ -59,7 +60,7 @@ def _chandrupatla(
     raise RuntimeError("calibration did not converge in log beta")
 
 
-def _calibrate_epsilon_P(
+def _calibrate_epsilon_P(  # noqa: C901
     logits: torch.Tensor, weighted_target: torch.Tensor, delta: float
 ) -> float:
     """Select an output temperature by evaluating the read-out's log-loss.
@@ -67,7 +68,7 @@ def _calibrate_epsilon_P(
     For single-pass source affiliations ``Gamma_src`` of shape ``(T, K)``
     and head transition matrix ``theta`` of shape ``(M, K)``, the unscaled logits are
     ``Z = Gamma_src @ L.T``,
-    where ``L[m, k] = log(max(theta[m, k], _eps(dtype)))`` is the stored safe log.
+    where ``L[m, k] = log(max(theta[m, k], tiny))`` is the stored log (:func:`floored_log_`).
     The read-out is ``P[t, :] = softmax(beta * Z[t, :])`` with ``beta = delta / epsilon_P``.
 
     ``weighted_target`` carries sample and class weights. Zero-mass rows are excluded
@@ -80,38 +81,36 @@ def _calibrate_epsilon_P(
     positive = weighted_target.sum(dim=1) > 0
     z = logits[positive]
     components = weighted_target[positive]
-    if not z.numel() or not bool(torch.isfinite(z).all()):
+    if not z.numel() or not _all_finite(z):
         raise RuntimeError("calibration needs finite logits on positive-weight labelled rows")
     components = components / components.sum()
     z = z - z.max(dim=1, keepdim=True).values
     row_mass = components.sum(dim=1)
     target_mean = (components * z).sum(dim=1)
-    floor = _eps(z.dtype)
+    precision = _eps(z.dtype)
     scratch = torch.empty_like(row_mass[:, None])
     indices = torch.empty(scratch.shape, dtype=torch.int64, device=z.device)
     scaled = torch.empty_like(z)
     probabilities = torch.empty_like(z)
-
-    def log_probabilities(beta: float) -> torch.Tensor:
-        scale_logits_(scaled, z, beta, scratch)
-        value = torch.log_softmax(scaled, dim=1)
-        if not bool(torch.isfinite(value).all()):
-            raise RuntimeError("calibration produced non-finite log probabilities")
-        return value
+    row_terms = torch.empty_like(row_mass)
+    selected = components > 0
+    selected_components = components[selected]
 
     def derivative(log_beta: float) -> float:
-        probabilities = log_probabilities(math.exp(log_beta)).exp()
-        value = float(((probabilities * z).sum(dim=1) * row_mass - target_mean).sum())
+        scale_logits_(scaled, z, math.exp(log_beta), 1.0, scratch)
+        torch.log_softmax(scaled, dim=1, out=probabilities)
+        torch.sum(probabilities.exp_().mul_(z), dim=1, out=row_terms)
+        value = float(row_terms.mul_(row_mass).sub_(target_mean).sum())
         if not math.isfinite(value):
             raise RuntimeError("calibration produced a non-finite derivative")
         return value
 
     def loss(epsilon: float) -> float:
         geometric_probabilities_(probabilities, z, delta, epsilon, scratch, indices)
-        selected = components > 0
-        if bool((probabilities[selected] == 0).any()):
+        selected_probabilities = probabilities[selected]
+        if bool((selected_probabilities == 0).any()):
             return math.inf
-        value = float(-(components[selected] * probabilities[selected].log()).sum())
+        value = float(-(selected_components * selected_probabilities.log()).sum())
         if not math.isfinite(value):
             raise RuntimeError("calibration produced a non-finite loss")
         return value
@@ -119,17 +118,11 @@ def _calibrate_epsilon_P(
     best_epsilon = delta
     best_loss = loss(best_epsilon)
     candidates = []
-    soft_floor = math.nextafter(floor, math.inf)
-    soft_upper = min(_BETA_MAX, delta / soft_floor)
-    if soft_upper >= _BETA_MIN:
-        root = _chandrupatla(
-            derivative, math.log(_BETA_MIN), math.log(soft_upper), math.sqrt(floor)
-        )
-        beta = min(soft_upper, max(_BETA_MIN, math.exp(root)))
-        candidates.append(max(soft_floor, delta / beta))
-    hard_epsilon = delta / _BETA_MAX
-    if hard_epsilon <= floor:
-        candidates.append(hard_epsilon)
+    root = _chandrupatla(derivative, math.log(_BETA_MIN), math.log(_BETA_MAX), math.sqrt(precision))
+    beta = min(_BETA_MAX, max(_BETA_MIN, math.exp(root)))
+    if delta / beta > 0.0:  # an underflowed temperature would repeat the hard read-out
+        candidates.append(delta / beta)
+    candidates.append(0.0)  # the hard read-out
     for epsilon in candidates:
         if not math.isfinite(epsilon):
             raise RuntimeError("calibration produced a non-finite output temperature")

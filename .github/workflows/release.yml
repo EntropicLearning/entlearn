@@ -1,12 +1,12 @@
 name: release
 
-# Deliberate, dispatch-only publishing to TestPyPI. No tag trigger: the
+# Deliberate, dispatch-only publishing to PyPI. No tag trigger: the
 # repo-topology cut tags v0.1.0 on the dev repo and must not auto-publish.
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type "publish" to confirm the TestPyPI upload'
+        description: 'Type "publish" to confirm the PyPI upload'
         required: true
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
     needs: build
     if: inputs.confirm == 'publish'
     runs-on: ubuntu-latest
-    environment: testpypi
+    environment: pypi
     permissions:
       id-token: write
     steps:
@@ -45,9 +45,5 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      # No stored secret: trusted publishing exchanges the job's OIDC token
-      # (id-token: write, above) for a short-lived upload token. This only
-      # works once test.pypi.org has a registered "trusted publisher" for
-      # this repo/workflow/environment (a one-time, RC-time manual step).
-      - name: Publish to TestPyPI (trusted publishing)
-        run: uv publish --publish-url https://test.pypi.org/legacy/ --trusted-publishing always dist/*
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish --trusted-publishing always dist/*

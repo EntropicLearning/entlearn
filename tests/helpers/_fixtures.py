@@ -119,6 +119,30 @@ def two_target_regression_data() -> tuple[np.ndarray, np.ndarray]:
     return np.column_stack((first, second, noise)), target
 
 
+def noisy_informative_data(task: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return two informative columns followed by 200 noise columns on 40 rows.
+
+    Classification has two classes that shift both informative columns. Regression has
+    two outputs, each driven by one informative column.
+    """
+    rng = np.random.default_rng(11)
+    if task == "classification":
+        target = rng.integers(0, 2, 40)
+        informative = 0.3 + 0.4 * target[:, None] + rng.normal(0, 0.1, (40, 2))
+    else:
+        informative = rng.random((40, 2))
+        target = informative + rng.normal(0, 0.05, (40, 2))
+    return np.column_stack((informative, rng.random((40, 200)))), target
+
+
+def unrelated_mixed_classification_data() -> tuple[np.ndarray, tuple[np.ndarray, ...], np.ndarray]:
+    """Return four continuous and four categorical features independent of two classes."""
+    rng = np.random.default_rng(0)
+    continuous = rng.random((40, 4))
+    categorical = tuple(rng.integers(0, 3, 40) for _ in range(4))
+    return continuous, categorical, rng.integers(0, 2, 40)
+
+
 def assert_feature_weights(
     weights: torch.Tensor,
     *,
@@ -190,7 +214,7 @@ def reporting_chain(*, task: str, kind: str, coupling, head_coupling):
     codes = torch.arange(12, dtype=torch.int64, device=DEVICE) % 3
     categories = () if kind == "manifold" else (codes % 2, codes)
     first = (
-        ManifoldInput(name="features", K=4, subspace_dimension=2, epsilon=0.4, epsilon_T=0.5)
+        ManifoldInput(name="features", K=4, subspace_dimension=2, epsilon=0.13, epsilon_T=0.15)
         if kind == "manifold"
         else Input(name="features", K=4, epsilon=0.4, epsilon_T=0.5, epsilon_D=0.5)
     )

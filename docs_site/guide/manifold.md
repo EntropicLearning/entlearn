@@ -23,8 +23,8 @@ Write $c_k$ for its centroid and $U_k\in\mathbb{R}^{D_{\mathrm{cont}}\times d_{\
 The discretisation error for an observation $x$ is
 
 $$
-g_k(x)=\underbrace{\left\Vert(I-U_kU_k^\top)(x-c_k)\right\Vert^2}_{\text{distance from the plane}}
-+\underbrace{\alpha\left\Vert x-c_k\right\Vert^2}_{\text{distance from the centroid}}.
+g_k(x)=\frac{1}{D_{\mathrm{cont}}}\left(\underbrace{\left\Vert(I-U_kU_k^\top)(x-c_k)\right\Vert^2}_{\text{distance from the plane}}
++\underbrace{\alpha\left\Vert x-c_k\right\Vert^2}_{\text{distance from the centroid}}\right).
 $$
 
 Here, $I$ is the identity matrix and $U_kU_k^\top$ projects onto the cluster's subspace.

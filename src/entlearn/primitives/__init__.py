@@ -11,10 +11,8 @@ from entlearn.primitives.coupling import (
     accumulate_coupling_,
     transition_partial_loss_,
 )
-from entlearn.primitives.dissimilarity import seed_dissimilarity
 from entlearn.primitives.distance import (
     assemble_categorical_cost_,
-    assemble_euclidean_cost_,
     refresh_weighted_norm_,
     weighted_sq_distance_,
     weighted_sq_norm_,
@@ -28,9 +26,10 @@ from entlearn.primitives.geometry import (
     mark_non_empty_clusters_,
 )
 from entlearn.primitives.manifold import (
+    SubspaceWorkspace,
     assemble_metrised_cost_,
     project,
-    weighted_subspace_,
+    weighted_subspaces_,
 )
 from entlearn.primitives.normalise import (
     floored_log_,
@@ -70,11 +69,11 @@ from entlearn.primitives.transitions import (
 )
 
 __all__ = [
+    "SubspaceWorkspace",
     "accumulate_coupling_",
     "apply_output_gate_",
     "argmin_assign_",
     "assemble_categorical_cost_",
-    "assemble_euclidean_cost_",
     "assemble_metrised_cost_",
     "assign_simplex_",
     "classification_output_accumulate_into_source_cost_",
@@ -100,7 +99,6 @@ __all__ = [
     "refresh_weighted_norm_",
     "regression_output_accumulate_into_source_cost_",
     "regression_output_loss_",
-    "seed_dissimilarity",
     "softmax_with_temp_",
     "split_wd",
     "transition_partial_loss_",
@@ -113,5 +111,5 @@ __all__ = [
     "weighted_assign_simplex_",
     "weighted_sq_distance_",
     "weighted_sq_norm_",
-    "weighted_subspace_",
+    "weighted_subspaces_",
 ]

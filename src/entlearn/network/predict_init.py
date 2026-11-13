@@ -10,7 +10,7 @@ from entlearn.network.blocks.classification import _ClassificationBlock
 from entlearn.network.config import PredictConfig
 from entlearn.network.initialisation.seeds import _validated_seed
 from entlearn.network.session import _CompiledGraph, _Workspace
-from entlearn.network.validation import _validate_distribution_rows
+from entlearn.network.validation import _all_finite, _validate_distribution_rows
 from entlearn.recipe import Coupling
 
 
@@ -61,7 +61,7 @@ def seed_prediction_(
             raise ValueError(
                 "predict_init must match prediction shape, computation dtype and device"
             )
-        if not bool(torch.isfinite(start).all()):
+        if not _all_finite(start):
             raise ValueError("predict_init must contain only finite values")
         if classification:
             _validate_distribution_rows(start, name="predict_init", allow_zero=False)
@@ -74,7 +74,7 @@ def seed_prediction_(
         mixture.exponential_(generator=generator)
         mixture.div_(mixture.sum(dim=1, keepdim=True))
         if not classification:
-            head.readout_(prediction, mixture, graph.terminal.delta, workspace)
+            head.readout_(prediction, mixture, graph.head_delta, workspace)
     elif start == "uniform":
         prediction.fill_(1 / prediction.shape[1])
     elif not classification:

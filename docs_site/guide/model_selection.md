@@ -127,6 +127,8 @@ Which settings should you search, and over which values?
 | `epsilon_M` | When learned output weights suit your question |
 | Prediction policy and `epsilon_P` | They can change the predictions without changing the fitted parameters |
 
+For `delta_cat`, search around the default, which [`delta_cat_guess`](../reference/helpers.md#entlearn.helpers.delta_cat_guess) computes from the scaled training data.
+
 Vary interacting parameters jointly within your search budget. Tuning them separately can miss useful combinations.
 
 Space the temperatures and `delta` logarithmically, and the cluster counts linearly.
@@ -144,7 +146,7 @@ The affiliation temperature `epsilon` is measured on the scale of the [discretis
 
 Whichever setting you search, if its best value sits **on a boundary** of its range, consider extending the range in that direction and search again.
 
-To favour fewer clusters, include a complexity penalty in a custom scorer or search objective, for example accuracy - `0.001 * K`. This changes the ranking even when prediction scores differ, so choose the penalty to reflect the tradeoff you want.
+To favour fewer clusters, include a complexity penalty in a custom scorer or search objective, for example accuracy - `0.001 * K`. This changes the ranking even when prediction scores differ, so choose the penalty to reflect the trade-off you want.
 
 The following grid crosses two cluster counts, two temperatures and both couplings of the classification head:
 
@@ -163,6 +165,34 @@ coarse_search = GridSearchCV(
 
 `Recipe.chain` names the head `output`, and a hidden connection's coupling is reached through `recipe__connections__<name>__coupling`.
 Include the current or default settings in the grid, as a control.
+
+For a hidden block, you can search `epsilon_ratio`: the block's `epsilon` divided by the `delta` of its incoming connection.
+For its outgoing connection, you can search `delta_ratio`: its `delta` divided by the `delta` of the hidden block's incoming connection.
+
+```python
+from entlearn import Hidden
+
+deep_recipe = Recipe.chain(
+    Input(K=4, epsilon=0.01),
+    Hidden(K=2, epsilon_ratio=1.5),
+    ClassificationHead(),
+    delta_ratio=3,  # The first connection takes Recipe.chain's default delta=1.0.
+)
+ratio_search = GridSearchCV(
+    EONClassifier(deep_recipe, random_state=7, max_iter=100),
+    {
+        "recipe__connections__input_to_hidden_1__delta": [0.1, 1.0],
+        "recipe__blocks__hidden_1__epsilon_ratio": [1.2, 1.5, 1.8],
+        "recipe__connections__hidden_1_to_output__delta_ratio": [1.0, 3.0],
+    },
+    cv=StratifiedKFold(2, shuffle=True, random_state=11),
+    scoring="neg_log_loss",
+).fit(X_train, y_train)
+selected_recipe = ratio_search.best_estimator_.recipe.resolve_ratios()
+```
+
+`best_params_` holds the selected ratios, and `resolve_ratios()` returns the recipe with the equivalent `epsilon` and `delta` values.
+In a deeper chain, `delta_ratio=3` in `Recipe.chain` makes each `delta` three times the one before it, and a grid can still search each connection's ratio by name.
 
 ## Select an initialisation for one recipe
 
@@ -409,7 +439,7 @@ Exact ties in the mean validation loss then go to the smallest `score - train_sc
 
 !!! warning "Validation rows can still influence the initialisation"
     As with [supplied states](#supply-initial-states-to-a-search), restrict initialisation to rows shared by every training partition. Pass their indices as `init_rows`. The caller is responsible for excluding validation rows.
-    Use `common_train_rows` to find the shared rows:
+    Use `common_train_rows` to find the shared rows.
     It takes the pairs, as CPU tensors or NumPy arrays, and returns a NumPy array, which `Network.fit` needs as a tensor on the device of the data:
 
     ```python
@@ -437,7 +467,8 @@ parallel_network = Network.fit(
 )
 ```
 
-Threads share the data. Processes copy it to each worker, and require the `selection_loss` and any other function you pass to be picklable, so define them at module level rather than inside another function.
+Threads share the data, but each candidate also runs PyTorch's own threads, and the package sets no limit on them. To keep several threads from oversubscribing the CPU, call `torch.set_num_threads` beforehand, for example with the number of cores divided by `n_jobs`.
+Processes copy the data to each worker, and require the `selection_loss` and any other function you pass to be picklable, so define them at module level rather than inside another function.
 A process request made from inside a worker or a non-main thread emits a warning and uses threads instead.
 With either backend, warnings raised inside a candidate reach your code once every candidate has finished, as described in [Troubleshooting](troubleshooting.md#warnings).
 The estimators accept the same `n_jobs` and `parallel_backend` parameters.

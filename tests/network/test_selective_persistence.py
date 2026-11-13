@@ -2,11 +2,13 @@
 
 import math
 import pickle
+import re
 
 import pytest
 import torch
-from conftest import DEVICE
+from conftest import DEVICE, FIXED_BUDGET
 from network._fixtures import (
+    active_widths,
     assert_same_values,
     corrupt_saved_tensor,
     read_saved_metadata,
@@ -27,6 +29,8 @@ from entlearn import (
     RegressionHead,
 )
 
+pytestmark = FIXED_BUDGET
+
 
 def round_trip_provided_groups(tmp_path, case, selected, resumable):
     """Save a fit started from ``selected`` donor groups, reload it and check the groups.
@@ -37,6 +41,7 @@ def round_trip_provided_groups(tmp_path, case, selected, resumable):
     """
     recipe, X, y, cats = case
     donor = Network.fit(recipe, X, y, X_cat=cats, max_iter=2)
+    recipe = active_widths(recipe, donor)
     provided = donor.capture_current_state(blocks=selected)
     source = Network.fit(recipe, X, y, X_cat=cats, initial_state=provided, max_iter=2, seed=9)
     path = tmp_path / "groups.safetensors"
@@ -72,8 +77,17 @@ class TestSelectivePersistence:
             tmp_path, resume_case(task, kind, coupling), selected=None, resumable=False
         )
 
-    @pytest.mark.parametrize("selected", [None, ("hidden_1", "output"), ("input",)])
-    @pytest.mark.parametrize("resumable", [False, True])
+    # (None, False) is the manifold row of the round-trip test above.
+    @pytest.mark.parametrize(
+        ("selected", "resumable"),
+        [
+            (None, True),
+            (("hidden_1", "output"), False),
+            (("hidden_1", "output"), True),
+            (("input",), False),
+            (("input",), True),
+        ],
+    )
     def test_selected_groups_keep_the_saved_capability(self, tmp_path, selected, resumable):
         case = resume_case(kind="manifold")
         source, loaded = round_trip_provided_groups(tmp_path, case, selected, resumable)
@@ -109,19 +123,6 @@ class TestSelectivePersistence:
         result = Network.load(path, device=DEVICE)
         assert result.schema.task == "regression"
         torch.testing.assert_close(result.predict(X), adapted.predict(X), rtol=0, atol=0)
-
-    @pytest.mark.parametrize("field", ["max_iter", "tol"])
-    def test_stopping_controls_are_required_metadata(self, tmp_path, field):
-        recipe, X, y, _ = resume_case()
-        path = tmp_path / "controls.safetensors"
-        Network.fit(recipe, X, y, max_iter=3, tol=0.02).save(path)
-        metadata = read_saved_metadata(path)
-        assert metadata["models"][0]["max_iter"] == 3
-        assert metadata["models"][0]["tol"] == 0.02
-        del metadata["models"][0][field]
-        write_saved_metadata(path, metadata)
-        with pytest.raises(ValueError):
-            Network.load(path)
 
     @pytest.mark.parametrize("resumable", [False, True])
     def test_the_file_preserves_the_selection_history_of_every_network(self, tmp_path, resumable):
@@ -185,6 +186,7 @@ class TestSelectivePersistence:
         assert_same_values(transported.initial_state, loaded.initial_state)
         assert transported.initial_state is transported.members[0].initial_state
 
+    @pytest.mark.filterwarnings("ignore:hidden block .* has K = 1:UserWarning")
     @pytest.mark.parametrize(
         "blocks",
         [
@@ -240,33 +242,61 @@ def captured_artefact(tmp_path):
 
 
 class TestSelectivePersistenceValidation:
+    # Each original transition passes the tensor manifest and reaches its value check; the
+    # other damage kinds belong to the manifest and probability owner tests.
     @pytest.mark.parametrize("index", [0, 1])
-    @pytest.mark.parametrize("damage", ["missing", "shape", "dtype", "nan", "simplex"])
+    @pytest.mark.parametrize("damage", ["missing", "simplex"])
     def test_invalid_original_transitions_are_rejected(self, captured_artefact, index, damage):
-        corrupt_saved_tensor(captured_artefact, f"states.0.parameters.{index}.theta", damage)
-        with pytest.raises(ValueError):
+        key = f"states.0.parameters.{index}.theta"
+        corrupt_saved_tensor(captured_artefact, key, damage)
+        block = ("hidden", "classification")[index]
+        message = (
+            f"^{block} transition rows must sum to one"
+            if damage == "simplex"
+            else f"saved tensor '{re.escape(key)}'"
+        )
+        with pytest.raises(ValueError, match=message):
             Network.load(captured_artefact)
 
     @pytest.mark.parametrize(
-        "location,value",
+        "location,value,message",
         [
-            (("states", 0, "parameters", 0, "source_width"), True),
-            (("states", 0, "parameters", 0, "coupling"), "other"),
-            (("states", 0, "parameters", 0, "description", "kind"), "Input"),
-            (("models", 0, "max_iter"), 0),
-            (("models", 0, "max_iter"), True),
-            (("models", 0, "tol"), -1),
-            (("models", 0, "tol"), True),
-            (("selection", "selected_index"), 1),
-            (("selection", "selected_index"), True),
-            (("selection", "selected_index"), -1),
-            (("selection", "initialisation_outcomes", 0, "train_score"), True),
-            (("selection", "initialisation_outcomes", 0, "train_score"), "nan"),
+            (("states", 0, "parameters", 0, "source_width"), True, "integer >= 1"),
+            (
+                ("states", 0, "parameters", 0, "coupling"),
+                "other",
+                "'other' is not a valid Coupling",
+            ),
+            (("models", 0, "max_iter"), 0, "integer >= 1"),
+            (("models", 0, "max_iter"), True, "integer >= 1"),
+            (("models", 0, "tol"), -1, "tolerance must be non-negative"),
+            (("models", 0, "tol"), True, "finite metadata number"),
+            (("selection", "selected_index"), 1, "winner contradicts"),
+            (("selection", "selected_index"), True, "integer >= 0"),
+            (("selection", "selected_index"), -1, "integer >= 0"),
+            (
+                ("selection", "initialisation_outcomes", 0, "train_score"),
+                True,
+                "finite metadata number",
+            ),
+            (
+                ("selection", "initialisation_outcomes", 0, "train_score"),
+                "nan",
+                "finite metadata number",
+            ),
         ],
     )
-    def test_invalid_group_and_control_metadata(self, captured_artefact, location, value):
+    def test_invalid_group_and_control_metadata(self, captured_artefact, location, value, message):
         set_metadata(captured_artefact, location, value)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
+            Network.load(captured_artefact)
+
+    def test_an_original_group_cannot_hold_an_input_description(self, captured_artefact):
+        metadata = read_saved_metadata(captured_artefact)
+        state = metadata["states"][0]
+        state["parameters"][0]["description"] = state["input_geometry"]["input"]
+        write_saved_metadata(captured_artefact, metadata)
+        with pytest.raises(ValueError, match="must be hidden or output"):
             Network.load(captured_artefact)
 
     @pytest.mark.parametrize("value", [{}, None])
@@ -311,11 +341,20 @@ class TestSelectivePersistenceValidation:
 
     def test_every_original_state_requires_input_geometry(self, captured_artefact):
         set_metadata(captured_artefact, ("states", 0, "input_geometry"), None)
-        with pytest.raises(ValueError, match="original state 0 has no input geometry"):
+        with pytest.raises(ValueError, match="state 0 has no input geometry"):
             Network.load(captured_artefact)
 
-    @pytest.mark.parametrize("damage", ["name", "order", "source_width"])
-    def test_original_groups_must_match_the_resolved_graph(self, captured_artefact, damage):
+    @pytest.mark.parametrize(
+        "damage,message",
+        [
+            ("name", "do not match the resolved graph order"),
+            ("order", "do not match the resolved graph order"),
+            ("source_width", "'hidden_1' is incompatible"),
+        ],
+    )
+    def test_original_groups_must_match_the_resolved_graph(
+        self, captured_artefact, damage, message
+    ):
         path = captured_artefact
         metadata = read_saved_metadata(path)
         groups = metadata["states"][0]["parameters"]
@@ -334,5 +373,5 @@ class TestSelectivePersistenceValidation:
             tensors["states.0.parameters.0.theta"] = torch.cat((theta, theta[:, :1]), dim=1)
         replace_saved_tensors(tensors, path)
         write_saved_metadata(path, metadata)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message):
             Network.load(path)

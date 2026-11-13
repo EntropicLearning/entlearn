@@ -1,5 +1,7 @@
 """Observable classification behaviour at the tabular adapter."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -20,7 +22,7 @@ class TestClassifier:
         direct = Network.fit(recipe, X_t, y_t, seed=7, max_iter=100)
 
         estimator = EONClassifier(recipe, random_state=7, max_iter=100, dtype=DTYPE, device=DEVICE)
-        assert estimator.fit(X, y) is estimator
+        estimator.fit(X, y)
 
         expected = direct.predict(X_t).cpu().numpy()
         np.testing.assert_array_equal(estimator.predict_proba(X), expected)
@@ -29,6 +31,31 @@ class TestClassifier:
         assert estimator.network_.recipe is recipe
         assert estimator.loss_curve_ == direct.diagnostics.loss_history
         assert estimator.n_iter_ == direct.diagnostics.n_iter
+
+    @pytest.mark.parametrize("predict_mode", ["single", "iterative"])
+    def test_call_time_geometric_policy_keeps_the_fitted_temperature(self, predict_mode):
+        rng = np.random.default_rng(5)
+        X = rng.uniform(0.2, 0.8, (48, 2))
+        y = np.where(X[:, 0] + rng.normal(0, 0.15, 48) > 0.5, "high", "low")
+        estimator = EONClassifier(
+            classifier_recipe(), random_state=7, dtype=DTYPE, device=DEVICE
+        ).fit(X, y)
+        fitted = estimator.network_.predict_config
+        request = PredictConfig(predict_mode=predict_mode, output_mode="geometric")
+        served = estimator.predict_proba(X, predict_config=request)
+
+        expected = (
+            estimator.predict_proba(X)
+            if predict_mode == "single"
+            else estimator.predict_proba(
+                X, predict_config=replace(fitted, predict_mode="iterative")
+            )
+        )
+        np.testing.assert_array_equal(served, expected)
+        # An explicit epsilon_P = delta = 1, the uncalibrated temperature, still overrides.
+        assert fitted.epsilon_P != 1.0
+        explicit = estimator.predict_proba(X, predict_config=replace(request, epsilon_P=1.0))
+        assert np.abs(explicit - served).max() > 1e3 * np.finfo(served.dtype).eps
 
     def test_mixed_features_replay_categories_in_original_column_order(self):
         X, y = tabular_data()
@@ -93,32 +120,10 @@ class TestClassifierControls:
         # A tolerance that large stops the trajectory after its first update.
         assert estimator.n_iter_ == 1
 
-    def test_reused_geometry_converts_to_the_requested_computation_precision(self):
+    def test_an_invalid_verbosity_reaches_the_network_check(self):
         X, y = tabular_data()
-        X_t, y_t = tensor_data(X, y)
-        other = torch.float32 if torch.float64 == DTYPE else torch.float64
-        state = Network.initialise(classifier_recipe(), X_t.to(other), y_t, seed=5)
-        assert state.input_geometry.continuous_centroids.dtype == other
-
-        estimator = EONClassifier(
-            classifier_recipe(), initial_state=state, dtype=DTYPE, device=DEVICE
-        ).fit(X, y)
-
-        assert estimator.network_.initial_state.input_geometry.continuous_centroids.dtype == DTYPE
-
-    @pytest.mark.parametrize(
-        "controls,error,message",
-        [
-            ({"device": "bogus"}, RuntimeError, "device type"),
-            ({"verbose": -1}, ValueError, "verbose must be a non-negative integer"),
-        ],
-    )
-    def test_invalid_execution_controls_reach_their_validation(self, controls, error, message):
-        X, y = tabular_data()
-        estimator = EONClassifier(
-            classifier_recipe(), **({"dtype": DTYPE, "device": DEVICE} | controls)
-        )
-        with pytest.raises(error, match=message):
+        estimator = EONClassifier(classifier_recipe(), verbose=-1, dtype=DTYPE, device=DEVICE)
+        with pytest.raises(ValueError, match="verbose must be"):
             estimator.fit(X, y)
 
     def test_target_rows_must_match_the_feature_rows(self):

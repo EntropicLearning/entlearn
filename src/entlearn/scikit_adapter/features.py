@@ -217,21 +217,21 @@ def _continuous_block(X: object, continuous_indices: Sequence[int], dtype: type)
                 else arr[:, list(continuous_indices)]
             )
             with np.errstate(over="ignore"):
-                return np.array(selected, dtype=dtype, order="C")
-    columns = []
-    for index in continuous_indices:
+                return np.asarray(selected, dtype=dtype, order="C")
+    block = np.empty((n_rows, len(continuous_indices)), dtype=dtype)
+    for position, index in enumerate(continuous_indices):
         raw = _column_values(X, index)
         if np.iscomplexobj(raw):
             raise ValueError("Complex data not supported")
         try:
             with np.errstate(over="ignore"):
-                columns.append(raw.astype(dtype))
+                block[:, position] = raw
         except ValueError as exc:
             raise ValueError(
                 f"continuous column at position {index} is not numeric; cast it to a "
                 "numeric dtype or mark it categorical"
             ) from exc
-    return np.column_stack(columns)
+    return block
 
 
 def _fit_feature_layout(
@@ -325,18 +325,20 @@ def _check_tabular_input(X: object) -> object:
         X = nw.to_native(X, pass_through=True)
     if not _is_dataframe(X):
         return check_array(X, dtype=None, ensure_all_finite=False)
-    n_cols = _column_count(X)
-    n_rows = len(_frame(X))
-    if n_rows == 0 or n_cols == 0:
-        check_array(X, dtype=None)
     return X
 
 
 def _feature_tensors(
     X_cont: np.ndarray, codes: list[np.ndarray], *, device: torch.device, dtype: torch.dtype
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-    """Check continuous values in computation precision and stage both modalities."""
-    X_cont = check_array(X_cont, dtype=_staging_dtype(dtype), ensure_min_features=0)
+    """Stage both modalities, sharing writeable host memory; Network checks the values."""
+    X_cont = check_array(
+        X_cont,
+        dtype=_staging_dtype(dtype),
+        ensure_min_features=0,
+        ensure_all_finite=False,
+        force_writeable=True,
+    )
     return (
         torch.as_tensor(X_cont, dtype=dtype, device=device),
         tuple(torch.as_tensor(code, dtype=torch.int64, device=device) for code in codes),

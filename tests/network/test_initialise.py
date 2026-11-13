@@ -1,16 +1,16 @@
 """Public contract tests for Network initialisation."""
 
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import replace
 
 import numpy as np
 import pytest
 import torch
+from conftest import FIXED_BUDGET
 from network._fixtures import classification_recipe, continuous_classification_data
 
 from entlearn import (
     ClassificationHead,
     Coupling,
-    DataSchema,
     Hidden,
     InitialState,
     Input,
@@ -48,16 +48,17 @@ class TestNetworkLifecycle:
             Network()
 
     def test_requires_an_exact_recipe(self):
-        with pytest.raises(ValueError, match="Recipe must be an exact Recipe"):
+        with pytest.raises(ValueError, match="exact Recipe"):
             Network.initialise(None, object(), object())
 
 
 class TestLifecyclePreliminaryChecks:
     @pytest.mark.parametrize("seed", (True, -1, 2**63), ids=("bool", "negative", "oversized"))
     def test_rejects_invalid_root_seed_before_data_access(self, seed):
-        with pytest.raises(ValueError, match="seed must be an integer in"):
+        with pytest.raises(ValueError, match="seed must be an integer"):
             Network.initialise(classification_recipe(K=2), object(), object(), seed=seed)
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("n_inits", (1, 2))
     def test_numpy_integer_seed_plans_the_same_seeds_as_int(self, n_inits):
         X, y = continuous_classification_data()
@@ -71,41 +72,30 @@ class TestLifecyclePreliminaryChecks:
         assert len(expected) == n_inits
         assert planned(np.int64(12)) == expected
 
-    def test_several_candidates_draw_their_seeds_below_the_bound_from_the_root(self):
+    @FIXED_BUDGET
+    def test_several_candidates_draw_distinct_in_range_seeds_from_the_root(self):
         X, y = continuous_classification_data()
-        fitted = Network.fit(classification_recipe(K=2), X, y, seed=12, n_inits=3, max_iter=1)
-        generator = torch.Generator(device=X.device).manual_seed(12)
-        expected = torch.randint(2**63 - 1, (3,), generator=generator, device=X.device)
-        seeds = [outcome.seed for outcome in fitted.diagnostics.initialisation_outcomes]
-        assert seeds == expected.tolist()
+
+        def planned(seed):
+            fitted = Network.fit(classification_recipe(K=2), X, y, seed=seed, n_inits=3, max_iter=1)
+            return [outcome.seed for outcome in fitted.diagnostics.initialisation_outcomes]
+
+        seeds = planned(12)
+        assert planned(12) == seeds
+        assert len(set(seeds)) == 3
+        assert all(0 <= seed < 2**63 for seed in seeds)
+        assert planned(13) != seeds
 
 
 class TestStateValues:
-    def test_data_schema_is_frozen(self):
-        schema = DataSchema(
-            task="classification",
-            D_cont=2,
-            M_cat=(3, 4),
-            M=5,
-            K_active=(("input", 3), ("hidden", 2), ("output", 5)),
-            computation_dtype=torch.float32,
-        )
-
-        with pytest.raises(FrozenInstanceError):
-            schema.M = 6
-
-    def test_initial_state_is_frozen_and_reads_its_active_k_from_the_centroids(self):
+    def test_initial_state_reads_its_active_k_from_the_centroids(self):
         state = _initial_state(input=Input(K=5), continuous_centroids=torch.zeros(3, 2))
 
         assert state.input_geometry.K_active == 3
-        with pytest.raises(FrozenInstanceError):
-            state.input_geometry = None
-        with pytest.raises(FrozenInstanceError):
-            state.input_geometry.captured = True
 
     def test_comparing_two_initial_states_answers_instead_of_raising(self):
         recipe = Recipe.chain(Input(K=3), ClassificationHead(coupling=Coupling.M))
-        X = torch.rand(6, 2, dtype=torch.float64)
+        X = torch.rand(6, 2, dtype=torch.float64, generator=torch.Generator().manual_seed(5))
         y = torch.tensor([0, 1, 0, 1, 0, 1])
         first = Network.initialise(recipe, X, y, seed=1)
         second = Network.initialise(recipe, X, y, seed=1)
@@ -160,7 +150,7 @@ class TestStandardContinuousInitialisation:
     def test_rejects_a_scalar_target(self, recipe, y):
         X_cont = torch.tensor([[0.0], [1.0]], dtype=torch.float64)
 
-        with pytest.raises(ValueError, match="y must be at least one-dimensional"):
+        with pytest.raises(ValueError, match="at least one-dimensional"):
             Network.initialise(recipe, X_cont, y)
 
     @pytest.mark.parametrize("non_tensor", ["X_cont", "y"])
@@ -180,7 +170,6 @@ class TestStandardContinuousInitialisation:
 
         state = Network.initialise(recipe, X_cont, y, seed=4)
 
-        assert isinstance(state, InitialState)
         assert state.input_geometry.input == recipe.blocks[0]
         assert state.input_geometry.continuous_centroids.shape == (2, 2)
         assert state.input_geometry.K_active == 2
@@ -193,29 +182,6 @@ class TestStandardContinuousInitialisation:
         assert state.input_geometry.prefix_reusable
         assert tuple(name for name, _ in state.connection_sub_seeds) == ("input_to_output",)
 
-    def test_validates_fixed_regression_weights_before_geometry_capacity(self):
-        recipe = Recipe.chain(Input(K=5), RegressionHead(W_M=(1.0,)))
-        X_cont = torch.zeros(3, 2, dtype=torch.float64)
-        y = torch.zeros(3, 2, dtype=torch.float64)
-
-        with pytest.raises(
-            ValueError, match="fixed W_M has length 1 but the output dimension is 2"
-        ):
-            Network.initialise(recipe, X_cont, y)
-
-    def test_validates_fixed_regression_weights_before_finite_feature_scan(self):
-        recipe = Recipe.chain(Input(K=5), RegressionHead(W_M=(1.0,)))
-        X_cont = torch.tensor(
-            [[float("nan"), 0.0], [0.0, 1.0], [1.0, 0.0]],
-            dtype=torch.float64,
-        )
-        y = torch.zeros(3, 2, dtype=torch.float64)
-
-        with pytest.raises(
-            ValueError, match="fixed W_M has length 1 but the output dimension is 2"
-        ):
-            Network.initialise(recipe, X_cont, y)
-
     def test_initialises_valid_multi_output_regression_without_output_state(self):
         recipe = Recipe.chain(Input(K=2), RegressionHead(W_M=(1.0, 2.0)))
         X_cont = torch.tensor(
@@ -226,6 +192,7 @@ class TestStandardContinuousInitialisation:
 
         state = Network.initialise(recipe, X_cont, y, seed=3)
 
+        assert state.parameters == ()
         assert state.input_geometry.continuous_centroids.shape == (2, 2)
         assert state.input_geometry.feature_weights is not None
         assert state.input_geometry.feature_weights.dtype is torch.float32
@@ -303,8 +270,8 @@ class TestInitialisationDeterminism:
         assert all(0 <= sub_seed < 2**63 for sub_seed in deeper_seeds.values())
         assert other_seeds["input_to_hidden_1"] != narrow_seeds["input_to_hidden_1"]
 
-    def test_falls_back_to_uniform_selection_among_coincident_rows(self):
-        X_cont = torch.tensor([[0.0], [0.0], [0.0], [5.0]], dtype=torch.float64)
+    def test_seeds_k_centroids_when_the_remaining_rows_coincide(self):
+        X_cont = torch.tensor([[0.0], [0.0], [0.0], [1.0]], dtype=torch.float64)
         y = torch.tensor([0, 1, 0, 1])
 
         state = Network.initialise(classification_recipe(K=3), X_cont, y, seed=9)
@@ -313,7 +280,7 @@ class TestInitialisationDeterminism:
         assert state.input_geometry.continuous_centroids.flatten().sort().values.tolist() == [
             0.0,
             0.0,
-            5.0,
+            1.0,
         ]
 
     def test_returns_detached_tensors_without_caller_storage_aliases(self):

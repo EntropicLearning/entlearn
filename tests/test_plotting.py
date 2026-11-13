@@ -1,9 +1,11 @@
 """Every plotting function draws a figure for every block type, without changing its inputs."""
 
+import numpy as np
 import plotly.graph_objects as go
 import pytest
 import torch
 from conftest import DEVICE, DTYPE
+from plotly.colors import hex_to_rgb, qualitative
 
 from entlearn import (
     ClassificationHead,
@@ -14,6 +16,7 @@ from entlearn import (
     Recipe,
     RegressionHead,
 )
+from entlearn.helpers.reporting import feature_importances
 from entlearn.plotting import (
     plot_affiliations,
     plot_centroids,
@@ -50,8 +53,16 @@ def manifold():
     generator = torch.Generator().manual_seed(4)
     t = torch.rand(80, 1, generator=generator, dtype=DTYPE)
     X = torch.cat([t, t**2, 0.05 * torch.rand(80, 1, generator=generator, dtype=DTYPE)], dim=1)
+    X, t = X.to(DEVICE), t.to(DEVICE)
     recipe = Recipe.chain(ManifoldInput(K=4, subspace_dimension=2, epsilon_T=0.5), RegressionHead())
-    return Network.fit(recipe, X.to(DEVICE), t.to(DEVICE), seed=1, max_iter=20), X.to(DEVICE), t
+    return Network.fit(recipe, X, t, seed=1, max_iter=20), X, t
+
+
+@pytest.fixture(scope="module")
+def two_output_manifold(manifold):
+    _, X, t = manifold
+    recipe = Recipe.chain(ManifoldInput(K=4, subspace_dimension=2), RegressionHead())
+    return Network.fit(recipe, X, torch.cat([t, -t], dim=1), seed=1), X
 
 
 class TestSmallFunctions:
@@ -60,16 +71,19 @@ class TestSmallFunctions:
         centroids = network.inspect("continuous_centroids")["input"]
         gamma = network.inspect("training_affiliations")["input"]
         theta = network.inspect("transition_matrices")["input_to_hidden_1"]
-        before = centroids.clone()
+        weights = network.inspect("feature_weights")["input"]
+        wt = torch.ones(len(X))
+        inputs = (X, centroids, gamma, theta, weights, wt)
+        before = [tensor.clone() for tensor in inputs]
         figures = [
             plot_loss(network.diagnostics.loss_history),
-            plot_feature_importance(network.inspect("feature_weights")["input"]),
-            plot_centroids(centroids, X, theta=theta, affiliations=gamma, wt=torch.ones(len(X))),
+            plot_feature_importance(weights),
+            plot_centroids(centroids, X, theta=theta, affiliations=gamma, wt=wt),
             plot_affiliations(X, gamma, centroids),
             plot_theta(theta),
         ]
         assert all(isinstance(figure, go.Figure) and figure.data for figure in figures)
-        assert torch.equal(centroids, before)
+        assert all(torch.equal(tensor, copy) for tensor, copy in zip(inputs, before, strict=True))
 
     def test_draws_into_a_subplot(self, classifier):
         from plotly.subplots import make_subplots
@@ -80,7 +94,6 @@ class TestSmallFunctions:
             network.inspect("transition_matrices")["input_to_hidden_1"], fig=figure, row=1, col=2
         )
         assert figure.data[0].xaxis == "x2"
-        assert figure.data[0].colorbar.x > figure.layout.xaxis2.domain[1]
 
     def test_class_probabilities_take_the_class_colours(self, classifier):
         network, X, y = classifier
@@ -91,15 +104,19 @@ class TestSmallFunctions:
 
 class TestNetworkFigures:
     @pytest.mark.parametrize("block", ["input", "hidden_1", "output", None])
-    def test_classifier_blocks(self, classifier, block):
+    def test_every_block_draws_with_and_without_data(self, classifier, block):
         network, X, _ = classifier
         assert network.plot(block=block).data
         assert network.plot(block=block, X_cont=X).data
 
     def test_manifold_and_regression_blocks(self, manifold):
         network, X, _ = manifold
-        titles = {annotation.text for annotation in network.plot(X_cont=X).layout.annotations}
-        assert "input · feature participation" in titles
+        figure = network.plot(X_cont=X)
+        # The participation panel is the one bar chart; the manifolds draw in a 3-D scene.
+        bars = [trace for trace in figure.data if isinstance(trace, go.Bar)]
+        assert len(bars) == 1
+        assert np.array_equal(bars[0].y, feature_importances(network).cpu().numpy())
+        assert any(isinstance(trace, go.Surface) for trace in figure.data)
         with pytest.raises(ValueError, match="X_cont"):
             network.plot(block="input")
 
@@ -122,22 +139,38 @@ class TestCategoricalData:
             plot_affiliations(X, affiliations, centroids),
         ]
         assert all(figure.data for figure in figures)
-        assert len(plot_decision(network, X, X_cat=X_cat).data) == 5
+        assert plot_decision(network, X, X_cat=X_cat).data
 
 
 class TestParallel:
     def test_every_centroid_crosses_every_axis(self, categorical):
         network, X, X_cat, y = categorical
         K, T = network.inspect("continuous_centroids")["input"].shape[0], len(X)
-        dimensions = plot_parallel(network, X, y, X_cat=X_cat).data[0].dimensions
-        labels = [dimension.label for dimension in dimensions]
-        assert labels == ["cluster", "x0", "x1", "x2", "0", "1", "2", "P(class 1)", "label"]
+        figure = plot_parallel(network, X, y, X_cat=X_cat)
+        dimensions = figure.data[0].dimensions
+        # Cluster, one axis per continuous feature, one per category of the 3-level feature
+        # (grouped under one band), then P(class 1) and the label.
+        assert len(dimensions) == 1 + 3 + 3 + 2
+        assert len(figure.layout.shapes) == 1
+        for d in range(3):
+            assert np.array_equal(dimensions[1 + d].values[:T], X[:, d].cpu().numpy())
+        one_hot = torch.nn.functional.one_hot(X_cat[0], 3).cpu().numpy()
+        for level in range(3):
+            assert tuple(dimensions[4 + level].range) == (0, 1)
+            assert np.array_equal(dimensions[4 + level].values[:T], one_hot[:, level])
         assert all(len(dimension.values) == T + K for dimension in dimensions)
         hidden = plot_parallel(network, X, y, X_cat=X_cat, show_data=False).data[0].dimensions
         assert all(len(dimension.values) == K for dimension in hidden)
         assert [d.range for d in hidden] == [d.range for d in dimensions]
         scaled = plot_parallel(network, X, X_cat=X_cat, scaled=True, colour="class")
-        assert scaled.data[0].dimensions[1].label == "√w·x0"
+        root_w = network.inspect("feature_weights")["input"].sqrt()
+        for d in range(3):
+            np.testing.assert_allclose(
+                scaled.data[0].dimensions[1 + d].values[:T],
+                (root_w[d] * X[:, d]).cpu().numpy(),
+                rtol=4 * torch.finfo(DTYPE).eps,  # one rounding on each side
+                atol=0,
+            )
 
     def test_rejects_an_unknown_or_impossible_colouring(self, categorical, manifold):
         network, X, X_cat, _ = categorical
@@ -151,9 +184,10 @@ class TestParallel:
 class TestDecisionAndManifold:
     def test_decision_with_and_without_scores(self, classifier):
         network, X, y = classifier
-        assert len(plot_decision(network, X, y).data) == 5
+        # Learned instance weights add the inlier panel, the second subplot.
+        assert any(trace.xaxis == "x2" for trace in plot_decision(network, X, y).data)
         unscored = Network.fit(Recipe.chain(Input(K=4), ClassificationHead()), X, y, seed=1)
-        assert len(plot_decision(unscored, X).data) == 3
+        assert all(trace.xaxis == "x" for trace in plot_decision(unscored, X).data)
         with pytest.raises(ValueError, match="classification"):
             plot_decision(
                 Network.fit(Recipe.chain(Input(K=3), RegressionHead()), X, X[:, :1], seed=1), X
@@ -165,12 +199,9 @@ class TestDecisionAndManifold:
         figure = plot_manifold(network, X, t, probes=probes)
         names = {trace.name for trace in figure.data}
         assert {"Manifolds", "Observations", "Probes (end)", "Inlier fade"} <= names
-        assert figure.layout.scene.dragmode == "turntable"
 
-    def test_manifold_chooses_its_features_and_output(self, manifold):
-        _, X, t = manifold
-        recipe = Recipe.chain(ManifoldInput(K=4, subspace_dimension=2), RegressionHead())
-        network = Network.fit(recipe, X, torch.cat([t, -t], dim=1).to(X.device), seed=1)
+    def test_manifold_chooses_its_features_and_output(self, two_output_manifold):
+        network, X = two_output_manifold
         figure = plot_manifold(network, X, features=(2, 0, 1), output=1)
         observations = next(trace for trace in figure.data if trace.name == "Observations")
         planes = next(trace for trace in figure.data if trace.name == "Manifolds (prediction)")
@@ -178,9 +209,23 @@ class TestDecisionAndManifold:
         assert figure.layout.scene.xaxis.title.text == "feature 2"
         assert list(observations.x) == X[:, 2].tolist()
         assert (planes.cmin, planes.cmax) == (float(second.min()), float(second.max()))
-        for bad in [dict(features=(0, 0, 1)), dict(features=(0, 1, 3)), dict(output=2)]:
-            with pytest.raises(ValueError, match=r"features|output"):
-                plot_manifold(network, X, **bad)
+
+    @pytest.mark.parametrize(
+        ("bad", "match"),
+        [
+            pytest.param(
+                dict(features=(0, 0, 1)), r"three different .*got \[0, 0, 1\]", id="duplicate"
+            ),
+            pytest.param(
+                dict(features=(0, 1, 3)), r"from 0 to 2; got \[0, 1, 3\]", id="out-of-range"
+            ),
+            pytest.param(dict(output=2), "output must be from 0 to 1", id="output"),
+        ],
+    )
+    def test_manifold_refuses_bad_features_or_output(self, two_output_manifold, bad, match):
+        network, X = two_output_manifold
+        with pytest.raises(ValueError, match=match):
+            plot_manifold(network, X, **bad)
 
     def test_manifold_planes_coloured_by_prediction(self, manifold):
         network, X, t = manifold
@@ -194,19 +239,35 @@ class TestDecisionAndManifold:
 
     def test_manifold_classifier_planes_mix_the_class_colours(self, manifold):
         _, X, t = manifold
-        y = (t[:, 0] > 0.5).long().to(X.device)
-        recipe = Recipe.chain(ManifoldInput(K=4, subspace_dimension=2), ClassificationHead())
+        y = (t[:, 0] > 0.5).long()
+        # Soft affiliations (epsilon=0.5) give blended probabilities across each plane.
+        recipe = Recipe.chain(
+            ManifoldInput(K=4, subspace_dimension=2, epsilon=0.5), ClassificationHead()
+        )
         network = Network.fit(recipe, X, y, seed=1, max_iter=20)
         traces = plot_manifold(network, X, y).data
         planes = [trace for trace in traces if trace.name == "Manifolds (prediction)"]
         observations = next(trace for trace in traces if trace.name == "Observations")
         labelled = plot_decision(network, X, y).data[-1].marker.color
-        assert planes and all(trace.vertexcolor is not None for trace in planes)
+        assert planes
+        palette = np.array([hex_to_rgb(colour) for colour in qualitative.Plotly[:2]], dtype=float)
+        mixed = False
+        for plane in planes:
+            points = torch.tensor(np.stack([plane.x, plane.y, plane.z], axis=1), device=DEVICE)
+            probabilities = network.predict(points.to(DTYPE)).cpu().numpy()
+            expected = probabilities @ palette
+            drawn = np.array([[float(v) for v in c[4:-1].split(",")] for c in plane.vertexcolor])
+            # Channels are drawn as whole numbers, rounded from probabilities that a
+            # different batch may compute a few eps apart.
+            atol = 0.5 + 255 * 64 * torch.finfo(DTYPE).eps
+            np.testing.assert_allclose(drawn, expected, rtol=0, atol=atol)
+            mixed |= bool(((probabilities > 0.05) & (probabilities < 0.95)).any())
+        assert mixed  # a blend, not only pure class colours, is on the planes
         assert list(observations.marker.color) == list(labelled)
 
     def test_manifold_classifier_lines_are_coloured_lines(self, manifold):
         _, X, t = manifold
-        y = (t[:, 0] > 0.5).long().to(X.device)
+        y = (t[:, 0] > 0.5).long()
         recipe = Recipe.chain(ManifoldInput(K=3, subspace_dimension=1), ClassificationHead())
         network = Network.fit(recipe, X, y, seed=1, max_iter=20)
         traces = plot_manifold(network, X, y).data

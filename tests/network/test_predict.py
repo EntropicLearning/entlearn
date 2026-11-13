@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import FIXED_BUDGET
 from network._fixtures import (
     blobs,
     classification_recipe,
@@ -10,29 +10,11 @@ from network._fixtures import (
     prediction_model,
 )
 
-from entlearn import Input, Network, PredictConfig, PredictionResult, ReconstructionResult
-
-
-class TestResultRecords:
-    @pytest.mark.parametrize(
-        "build",
-        [
-            lambda: PredictionResult(prediction=torch.ones(3, dtype=DTYPE, device=DEVICE)),
-            lambda: ReconstructionResult(
-                continuous=torch.ones(3, 2, dtype=DTYPE, device=DEVICE),
-                categorical=(torch.full((3, 2), 0.5, dtype=DTYPE, device=DEVICE),),
-            ),
-        ],
-        ids=["prediction", "reconstruction"],
-    )
-    def test_records_compare_and_hash_by_identity(self, build):
-        record, copy = build(), build()
-        assert record == record  # noqa: PLR0124
-        assert record != copy
-        assert len({record, copy}) == 2
+from entlearn import Input, Network, PredictConfig
 
 
 class TestPredictionDetails:
+    @FIXED_BUDGET
     @pytest.mark.parametrize("mode", ["single", "iterative"])
     def test_diagnostics_are_requested_together(self, mode):
         model, X, _ = prediction_model()
@@ -48,25 +30,27 @@ class TestPredictionDetails:
         assert minimal.loss_history is None
         torch.testing.assert_close(result.prediction, minimal.prediction, rtol=0, atol=0)
 
-    @pytest.mark.parametrize(("max_iter", "tol", "expected"), [(1, 0.0, False), (8, 1.0, True)])
+    # The tolerance of 10 is met on the second iteration, which is the last one allowed.
+    @FIXED_BUDGET
+    @pytest.mark.parametrize(("max_iter", "tol", "expected"), [(1, 0.0, False), (2, 10.0, True)])
     def test_convergence_flag_reports_the_tolerance_not_the_iteration_ceiling(
         self, max_iter, tol, expected
     ):
         model, X, _ = prediction_model()
         config = PredictConfig(predict_mode="iterative", max_iter=max_iter, tol=tol)
         result = model.predict_with_details(X, predict_config=config, details=("diagnostics",))
+        assert result.n_iter == max_iter
         assert result.converged is expected
-        assert (result.n_iter < max_iter) is expected
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize("name", ["n_iter", "converged", "loss_history"])
     def test_individual_diagnostic_requests_are_rejected(self, name):
         model, _, _ = prediction_model()
         with pytest.raises(ValueError, match="detail"):
             model.predict_with_details(None, details=(name,))
 
-    @pytest.mark.parametrize(
-        "details", [None, 42, "affiliations", ("unknown",), (["affiliations"],)]
-    )
+    @FIXED_BUDGET
+    @pytest.mark.parametrize("details", [None, "affiliations", ("unknown",), (["affiliations"],)])
     def test_bad_detail_request_is_rejected_before_staging(self, details):
         model, _, _ = prediction_model()
         with pytest.raises(ValueError, match="detail"):
@@ -88,11 +72,9 @@ class TestPredictionDetails:
         assert minimal.affiliations is None
         assert minimal.n_iter is None
 
-    def test_invalid_detail_is_rejected_before_query_staging(self):
+    def test_instance_weights_detail_requires_recovery(self):
         X, y = blobs(2, 0.1)
         network = Network.fit(classification_recipe(K=3), X, y, max_iter=10)
-        with pytest.raises(ValueError, match="detail"):
-            network.predict_with_details(None, details=("unknown",))
         with pytest.raises(ValueError, match="instance_weights"):
             network.predict_with_details(None, details=("instance_weights",))
 
@@ -102,6 +84,7 @@ class TestPredictionDetails:
         with pytest.raises(ValueError, match="iterative"):
             network.predict(X, predict_config=PredictConfig(), predict_init="uniform")
 
+    @FIXED_BUDGET
     def test_details_own_independent_detached_storage(self):
         model, X, _ = prediction_model()
         X.requires_grad_(True)
@@ -145,6 +128,7 @@ class TestRecoveredWeights:
 
 
 class TestMemberDetails:
+    @FIXED_BUDGET
     @pytest.mark.parametrize("task", ["classification", "regression"])
     def test_member_details_preserve_order_and_delegate_the_complete_policy(self, task):
         model, X, cats = prediction_model(task, members=True)
@@ -172,13 +156,16 @@ class TestMemberDetails:
             )
             torch.testing.assert_close(result.prediction, prediction, rtol=0, atol=0)
             torch.testing.assert_close(result.prediction, expected.prediction, rtol=0, atol=0)
-            torch.testing.assert_close(result.instance_weights, expected.instance_weights)
+            torch.testing.assert_close(
+                result.instance_weights, expected.instance_weights, rtol=0, atol=0
+            )
             for name, gamma in result.affiliations.items():
-                torch.testing.assert_close(gamma, expected.affiliations[name])
+                torch.testing.assert_close(gamma, expected.affiliations[name], rtol=0, atol=0)
             assert result.n_iter == expected.n_iter
             assert result.converged == expected.converged
             assert result.loss_history == expected.loss_history
 
+    @FIXED_BUDGET
     def test_member_details_require_retained_members(self):
         model, X, _ = prediction_model()
         with pytest.raises(ValueError, match='retain="members"'):

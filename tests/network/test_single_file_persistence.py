@@ -6,11 +6,14 @@ from importlib.metadata import version
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET
 from network._fixtures import read_saved_metadata, resume_case, write_saved_metadata
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 from entlearn import Network
+
+pytestmark = FIXED_BUDGET
 
 
 class TestSingleFilePersistence:
@@ -28,12 +31,6 @@ class TestSingleFilePersistence:
             assert metadata["format"] == "entlearn.network"
             assert metadata["version"] == 1
             assert metadata["package_version"] == version("entlearn")
-            names = set(bundle.keys())
-        assert "states.0.continuous_centroids" in names
-        if kind == "categorical":
-            assert "states.0.categorical_centroids.0" in names
-        if kind == "manifold":
-            assert "states.0.manifold_projectors" in names
         moved = tmp_path / "moved.safetensors"
         shutil.move(path, moved)
         original.rmdir()

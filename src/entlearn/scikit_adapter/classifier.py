@@ -12,7 +12,7 @@ import torch
 from sklearn.base import ClassifierMixin
 from sklearn.model_selection import BaseCrossValidator
 from sklearn.utils.multiclass import check_classification_targets
-from sklearn.utils.validation import check_consistent_length, column_or_1d
+from sklearn.utils.validation import assert_all_finite, check_consistent_length, column_or_1d
 
 from entlearn import ClassificationHead, InitialState, PredictConfig, Recipe
 from entlearn.scikit_adapter.base import _BaseEON, _StagedTarget
@@ -37,6 +37,8 @@ def _prepare_classification_y(
         if lower < bounds.min or upper > bounds.max:
             raise ValueError("integer labels must fit in int64 or uint64")
         arr = np.asarray(arr, dtype=dtype)
+    if arr.dtype.kind == "f":
+        assert_all_finite(arr, input_name="y")
     check_classification_targets(arr)
     is_numeric = np.issubdtype(arr.dtype, np.number)
     labelled_mask = arr != -1 if is_numeric else np.ones(arr.shape[0], dtype=bool)
@@ -114,6 +116,7 @@ class EONClassifier(ClassifierMixin, _BaseEON):
 
     ``predict_config`` is the complete fit-time prediction policy. By default prediction
     uses the fitted policy, including its calibrated temperature, but can be replaced by supplying a call-time configuration.
+    A call-time configuration without ``epsilon_P`` keeps the fitted temperature.
 
     ``warm_start=False`` starts a fresh fit. ``"resume"`` continues the fitted
     trajectory on its training rows; ``max_iter`` is a total iteration ceiling.

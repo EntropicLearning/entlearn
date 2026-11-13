@@ -7,8 +7,8 @@ from itertools import pairwise
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
-from network._fixtures import connection_initialisation_data
+from conftest import DEVICE, DTYPE, FIXED_BUDGET, RANK_DEFICIENT
+from network._fixtures import connection_initialisation_data, materialise
 
 from entlearn import (
     ClassificationHead,
@@ -26,7 +26,8 @@ from entlearn.network.blocks import manifold as mfld
 from entlearn.network.blocks import regression as reg
 from entlearn.network.blocks.manifold import _ManifoldInputBlock
 from entlearn.network.blocks.regression import _RegressionBlock
-from entlearn.network.connections import _ConnectionState
+
+pytestmark = FIXED_BUDGET
 
 _FORWARD = ("input", "hidden_1", "hidden_2", "hidden_3", "output")
 
@@ -45,7 +46,6 @@ def _explicit_iteration(session):
         graph.prune_(hidden, session.workspace)
         hidden.update_incoming_connections_(session)
     block = graph.input
-    graph.accumulate_outgoing_cost_(block, block.live_cache.disc_cost[:, : block.K], session)
     inp.update_affiliations_(block, session)
     graph.prune_(block, session.workspace)
     inp.update_instance_weights_(block, session)
@@ -61,20 +61,16 @@ def _explicit_iteration(session):
 
 
 def _explicit_loss(session):
-    # Price each contribution separately, then reduce in the specified order.
-    total = torch.zeros_like(session.workspace.loss)
+    # Accumulate the blocks, then the connections, in forward graph order.
+    session.workspace.loss.zero_()
     for name in _FORWARD:
-        session.workspace.loss.zero_()
         session.graph.blocks[name].partial_loss_(session)
-        total.add_(session.workspace.loss)
     for source, target in pairwise(_FORWARD[:4]):
-        session.workspace.loss.zero_()
         hidden = session.graph.blocks[target]
         hidden.incoming[f"{source}_to_{target}"].partial_loss_(
             hidden.gamma, session.graph.affiliations(source), session
         )
-        total.add_(session.workspace.loss)
-    return total.item()
+    return session.workspace.loss.item()
 
 
 def _tensors(value, prefix=""):
@@ -96,6 +92,7 @@ def _tensors(value, prefix=""):
 
 
 class TestUpdateSchedule:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("weighted", [False, True])
@@ -144,36 +141,35 @@ class TestUpdateSchedule:
         assert actual.keys() == expected.keys()
         for name in actual:
             torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0, msg=name)
-        torch.testing.assert_close(
-            torch.tensor(production.diagnostics.loss_history, dtype=DTYPE),
-            torch.tensor(explicit.diagnostics.loss_history, dtype=DTYPE),
-            rtol=256 * torch.finfo(DTYPE).eps,
-            atol=256 * torch.finfo(DTYPE).eps,
-        )
         assert len(production.diagnostics.loss_history) == 2
+        assert production.diagnostics.loss_history == explicit.diagnostics.loss_history
         torch.testing.assert_close(
-            production.predict(X, X_cat=categorical), explicit.predict(X, X_cat=categorical)
+            production.predict(X, X_cat=categorical),
+            explicit.predict(X, X_cat=categorical),
+            rtol=0,
+            atol=0,
         )
 
-    def test_loss_connections_are_visited_in_forward_order_not_recipe_storage_order(
-        self, monkeypatch
-    ):
-        X, y = connection_initialisation_data()
+
+class TestInputCost:
+    def test_loss_and_instance_weights_price_each_rows_whole_discretisation_error(self):
+        X, codes = connection_initialisation_data()
+        X = torch.cat((X, X.square()), dim=1)  # a norm that differs from row to row
+        epsilon_D, epsilon_T = 0.2, 0.3
         recipe = Recipe.chain(
-            Input(K=4, epsilon=0.2),
-            Hidden(K=3, epsilon=0.2),
-            Hidden(K=2, epsilon=0.2),
-            ClassificationHead(coupling=Coupling.M),
-            coupling=Coupling.M,
+            Input(K=3, epsilon=0.0, epsilon_D=epsilon_D, epsilon_T=epsilon_T), ClassificationHead()
         )
-        recipe = replace(recipe, connections=tuple(reversed(recipe.connections)))
-        seen = []
-        partial_loss = _ConnectionState.partial_loss_
+        session = materialise(recipe, X, codes, seed=3, warmup=1)
+        block = session.graph.input
+        Wd, Wt = block.feature_weights, block.instance_weights
+        distance = ((X[:, None, :] - block.continuous_centroids[None]).square() * Wd).sum(2)
+        cost = (block.gamma * distance).sum(1)
+        entropies = epsilon_D * (Wd * Wd.log()).sum() + epsilon_T * (Wt * Wt.log()).sum()
+        expected_loss = (Wt * cost).sum() + entropies
 
-        def observe(state, *args, **kwargs):
-            seen.append(state.description.name)
-            return partial_loss(state, *args, **kwargs)
+        session.workspace.loss.zero_()
+        block.partial_loss_(session)
+        inp.update_instance_weights_(block, session)
 
-        monkeypatch.setattr(_ConnectionState, "partial_loss_", observe)
-        Network.fit(recipe, X, y, max_iter=1)
-        assert seen == ["input_to_hidden_1", "hidden_1_to_hidden_2"] * 2
+        torch.testing.assert_close(session.workspace.loss, expected_loss)
+        torch.testing.assert_close(block.instance_weights, torch.softmax(-cost / epsilon_T, 0))

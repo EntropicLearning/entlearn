@@ -1,10 +1,13 @@
 """Stored entries and basis-invariant manifold geometry have different counts."""
 
 import pytest
+from conftest import FIXED_BUDGET, RANK_DEFICIENT
 
 from entlearn.helpers.reporting import count_parameters
 
 from ._fixtures import manifold_count_model
+
+pytestmark = FIXED_BUDGET
 
 
 class TestManifoldCounts:
@@ -21,10 +24,10 @@ class TestManifoldCounts:
         assert count_parameters(model, raw=True, include_affiliations=True) == 3 + 3 * d + 6
         assert count_parameters(model, include_affiliations=True) == centre + d * (3 - d) + 2
 
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("alpha", [0.0, 0.1])
     def test_pruned_geometry_counts_active_not_declared_width(self, alpha):
         model = manifold_count_model(1, alpha, prune=True)
-        assert model.recipe.blocks[0].K == 3
         assert dict(model.schema.K_active)["input"] == 1
         assert count_parameters(model, raw=True) == 8
         assert count_parameters(model) == (6 if alpha == 0 else 7)

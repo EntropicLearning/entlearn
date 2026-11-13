@@ -2,10 +2,12 @@
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import assert_simplex_rows, classification_recipe
 
 from entlearn import Input, Network
+
+pytestmark = FIXED_BUDGET
 
 
 class TestDistributionTargets:

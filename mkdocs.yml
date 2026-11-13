@@ -22,6 +22,7 @@ extra_javascript:
   - https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js
   - https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6.16/dist/plot.umd.min.js
   - javascripts/figures.js
+  - javascripts/notebooks.js
 
 extra:
   version:
@@ -133,6 +134,12 @@ nav:
   - Tutorials:
       - Overview: tutorials/index.md
       - Tutorial series: tutorials/series.md
+      - Fit your first network: tutorials/01_first_network.md
+      - Create a recipe: tutorials/02_recipes_and_blocks.md
+      - Inspect a fitted network: tutorials/03_insight.md
+      - Select a model: tutorials/04_model_search.md
+      - Build a deeper network: tutorials/05_deeper_networks.md
+      - Learn a curved surface: tutorials/06_manifold_regression.md
   - API:
       - reference/index.md
       - Recipe: reference/recipe.md

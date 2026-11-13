@@ -1,7 +1,7 @@
 """Validation of provided, transferred and published state, each where it enters an operation.
 
 - ``validate_original_state``: the original states a fitted model retains.
-- ``validate_parameter_state``: fitted tensors transferred into a continuation.
+- ``validate_parameter_state``: fitted tensors, for loading and the resume capability.
 - ``validate_prediction_ready_state``: a published model decoded from a snapshot.
 """
 
@@ -18,6 +18,7 @@ from entlearn.network.blocks.input_common import has_instance_weight_recovery
 from entlearn.network.blocks.manifold import _ManifoldInputBlock, stage_projectors
 from entlearn.network.blocks.regression import _RegressionBlock
 from entlearn.network.blocks.types import _ClusteringBlock, _InputBlock, _OutputBlock
+from entlearn.network.data import _fixed_output_weights
 from entlearn.network.initialisation.resolve_state import parameters_match, validate_initial_state
 from entlearn.network.parameter_validation import validate_simplex_tensor, validate_tensor
 from entlearn.network.session import _CompiledGraph
@@ -28,7 +29,8 @@ from entlearn.network.state import (
     _FittedNetwork,
     _input_width,
 )
-from entlearn.network.validation import _normalise_weights
+from entlearn.network.validation import _all_finite
+from entlearn.primitives.normalise import _eps
 from entlearn.recipe import Coupling, Head, Hidden, InputBlock
 
 
@@ -76,10 +78,6 @@ def validate_parameter_state(fitted: _FittedNetwork, *, require_rows: bool = Fal
         ValueError: If parameters or requested row-bound coordinates are inconsistent.
     """
     graph, schema = fitted.graph, fitted.schema
-    if graph.training_rows < 1:
-        raise ValueError("training row count must be positive")
-    if schema.computation_dtype not in (torch.float32, torch.float64):
-        raise ValueError("computation dtype must be torch.float32 or torch.float64")
     anchor = validate_tensor(graph.input.continuous_centroids, "fitted geometry", finite=False)
     place = _Placement(schema.computation_dtype, anchor.device)
     rows = graph.training_rows if require_rows else None
@@ -120,7 +118,13 @@ def _validate_input_parameters(
     if rows is not None:
         place.simplex(block.instance_weights, (rows,), f"{name}.instance_weights")
     log_partition = place.tensor(block.log_partition, (), f"{name}.log_partition", finite=False)
-    if bool(torch.isnan(log_partition)) or bool(torch.isneginf(log_partition)):
+    shift = place.tensor(block.partition_shift, (), f"{name}.partition_shift", finite=False)
+    if (
+        bool(torch.isnan(log_partition))
+        or bool(log_partition < 0)
+        or bool(torch.isnan(shift))
+        or bool(torch.isinf(shift)) != bool(torch.isinf(log_partition))
+    ):
         raise ValueError("invalid training log normaliser")
     if isinstance(block, _StandardInputBlock):
         D = schema.D_cont + len(schema.M_cat)
@@ -174,6 +178,9 @@ def _validate_head_parameters(
     dim = 0 if description.coupling is Coupling.M else 1
     place.simplex(block.theta, (schema.M, source_width), f"{name}.theta", dim=dim)
     place.tensor(block.log_theta, block.theta.shape, f"{name}.log_theta")
+    classes, initial_source = block.initial_widths
+    if classes != schema.M or initial_source < source_width:
+        raise ValueError("invalid initial class or source cluster count")
 
 
 def validate_original_bindings(
@@ -242,6 +249,10 @@ def validate_prediction_ready_state(fitted: _FittedNetwork, *, require_rows: boo
                         "connection prior cluster counts exceed initial graph capacities"
                     )
     head = graph.head
+    if isinstance(head, _ClassificationBlock):
+        (connection,) = graph.incoming[head.description.name]
+        if head.initial_widths[1] > maxima[connection.source]:
+            raise ValueError("head prior cluster counts exceed initial graph capacities")
     if isinstance(head, _RegressionBlock):
         _validate_regression_output_weights(head, schema, anchor.device)
     _validate_scoring_reference(fitted, anchor.device)
@@ -256,7 +267,7 @@ def _validate_scoring_reference(fitted: _FittedNetwork, device: torch.device) ->
             or reference.shape != (graph.training_rows,)
             or reference.dtype != fitted.schema.computation_dtype
             or reference.device != device
-            or not bool(torch.isfinite(reference).all())
+            or not _all_finite(reference)
             or bool((reference < 0).any())
         ):
             raise ValueError("invalid scoring reference")
@@ -272,18 +283,13 @@ def _validate_regression_output_weights(
     # Recipe weights require an explicit vector.
     if head.W_M is None and (math.isfinite(description.epsilon_M) or description.W_M is not None):
         raise ValueError("missing fitted regression output weights")
-    if description.W_M is not None:
-        if len(description.W_M) != schema.M:
-            raise ValueError("fixed output weights do not match the number of regression targets")
-        expected = _normalise_weights(
-            torch.tensor(description.W_M, dtype=schema.computation_dtype, device=device),
-            name="W_M",
-        )
-        # A float64 model may retain weights originally normalised in float32.
-        if head.W_M is None or not torch.allclose(
-            head.W_M, expected, rtol=0, atol=8 * schema.M * torch.finfo(torch.float32).eps
-        ):
-            raise ValueError("fitted output weights disagree with the fixed Recipe values")
+    expected = _fixed_output_weights(description, schema.M, schema.computation_dtype, device)
+    # A float64 model may retain weights originally normalised in float32.
+    if expected is not None and (
+        head.W_M is None
+        or not torch.allclose(head.W_M, expected, rtol=0, atol=8 * schema.M * _eps(torch.float32))
+    ):
+        raise ValueError("fitted output weights disagree with the fixed Recipe values")
 
 
 def resume_error(fitted: _FittedNetwork) -> str | None:

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Usage: scripts/gate [PYTEST_ARG...] — run every check on this checkout; extra arguments go to the suite.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 2
+failed=()
+step() { local name=$1; shift; echo "gate: $name"; "$@" || failed+=("$name"); }
+
+echo "gate: $(git rev-parse --short HEAD), $(git status --porcelain | wc -l | tr -d ' ') changed paths"
+step ruff-format uv run --locked ruff format --check .
+step ruff-check uv run --locked ruff check .
+step ty uv run --locked ty check
+step scripts uv run --locked pytest -p no:cacheprovider scripts
+step suite uv run --locked pytest -p no:cacheprovider "$@"
+
+if [ ${#failed[@]} -gt 0 ]; then echo "gate: FAILED ${failed[*]}"; exit 1; fi
+echo "gate: passed"

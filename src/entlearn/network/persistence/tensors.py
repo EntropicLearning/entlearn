@@ -49,7 +49,7 @@ from entlearn.network.state_validation import (
     validate_original_state,
     validate_prediction_ready_state,
 )
-from entlearn.primitives.normalise import _is_soft, floored_log_
+from entlearn.primitives.normalise import floored_log_
 from entlearn.recipe import (
     Block,
     ClassificationHead,
@@ -85,7 +85,7 @@ class TensorReader:
 
 
 def safe_log(value: torch.Tensor) -> torch.Tensor:
-    """Rebuild a safe-log cache directly in the computation dtype."""
+    """Return the input after :func:`floored_log_`."""
     result = torch.empty_like(value)
     floored_log_(result, value)
     return result
@@ -241,6 +241,7 @@ def _encode_input_tensors(
         tensors[f"{key}.instance_weights"] = block.instance_weights
     tensors[f"{key}.continuous_centroids"] = block.continuous_centroids
     tensors[f"{key}.log_partition"] = block.log_partition
+    tensors[f"{key}.partition_shift"] = block.partition_shift
     if isinstance(block, _StandardInputBlock):
         tensors[f"{key}.feature_weights"] = block.feature_weights
         for j, value in enumerate(block.categorical_centroids):
@@ -256,10 +257,8 @@ def _encode_block(
     """Return one fitted block's metadata and tensors, with its affiliations when resumable."""
     metadata: dict[str, Any] = {"name": name}
     tensors = {}
-    if isinstance(block, _ClusteringBlock):
-        metadata["soft_assignments"] = block.soft_assignments
-        if resumable:
-            tensors[f"{key}.gamma"] = block.gamma
+    if isinstance(block, _ClusteringBlock) and resumable:
+        tensors[f"{key}.gamma"] = block.gamma
     match block:
         case _StandardInputBlock() | _ManifoldInputBlock():
             tensors.update(_encode_input_tensors(block, key, resumable=resumable))
@@ -268,6 +267,7 @@ def _encode_block(
             metadata["initial_widths"] = connection.initial_widths
             tensors[f"{key}.theta"] = connection.theta
         case _ClassificationBlock():
+            metadata["initial_widths"] = block.initial_widths
             tensors[f"{key}.theta"] = block.theta
         case _RegressionBlock():
             tensors[f"{key}.C_y"] = block.C_y
@@ -325,7 +325,6 @@ def _decode_input(
     key: str,
     reader: TensorReader,
     schema: DataSchema,
-    soft: bool,
     gamma: torch.Tensor,
 ) -> _InputBlock:
     K = dict(schema.K_active)[description.name]
@@ -337,6 +336,7 @@ def _decode_input(
         else torch.empty(0, dtype=dtype, device=device)
     )
     log_partition = reader.take(f"{key}.log_partition", (), dtype)
+    shift = reader.take(f"{key}.partition_shift", (), dtype)
     if isinstance(description, Input):
         categories = tuple(
             reader.take(f"{key}.categorical_centroids.{j}", (K, M), dtype)
@@ -351,7 +351,7 @@ def _decode_input(
             categories,
             tuple(safe_log(c) for c in categories),
             log_partition,
-            soft,
+            shift,
         )
     return _ManifoldInputBlock(
         description,
@@ -364,8 +364,15 @@ def _decode_input(
         gamma,
         weights,
         log_partition,
-        soft,
+        shift,
     )
+
+
+def _decode_initial_widths(data: dict[str, Any]) -> tuple[int, int]:
+    widths = tuple(integer(count, minimum=1) for count in sequence(data["initial_widths"]))
+    if len(widths) != 2:
+        raise ValueError("invalid saved transition prior cluster counts")
+    return widths[0], widths[1]
 
 
 def _decode_hidden(
@@ -375,29 +382,26 @@ def _decode_hidden(
     reader: TensorReader,
     schema: DataSchema,
     connection: Connection,
-    soft: bool,
     gamma: torch.Tensor,
 ) -> _HiddenBlock:
     counts = dict(schema.K_active)
     K, dtype = counts[description.name], schema.computation_dtype
     theta = reader.take(f"{key}.theta", (K, counts[connection.source]), dtype)
-    initial_widths = tuple(integer(count, minimum=1) for count in sequence(data["initial_widths"]))
-    if len(initial_widths) != 2:
-        raise ValueError("invalid saved connection prior cluster counts")
     # Priors retain their original capacities even when fitting pruned clusters.
-    state = _ConnectionState(connection, theta, safe_log(theta), initial_widths)
-    return _HiddenBlock(description, gamma, {connection.name: state}, soft)
+    state = _ConnectionState(connection, theta, safe_log(theta), _decode_initial_widths(data))
+    return _HiddenBlock(description, gamma, {connection.name: state})
 
 
 def _decode_classification(
     description: ClassificationHead,
+    data: dict[str, Any],
     key: str,
     reader: TensorReader,
     schema: DataSchema,
     source_clusters: int,
 ) -> _ClassificationBlock:
     theta = reader.take(f"{key}.theta", (schema.M, source_clusters), schema.computation_dtype)
-    return _ClassificationBlock(description, theta, safe_log(theta))
+    return _ClassificationBlock(description, theta, safe_log(theta), _decode_initial_widths(data))
 
 
 def _decode_regression(
@@ -430,20 +434,14 @@ def _decode_fitted_block(
     resumable: bool,
 ) -> _RuntimeBlock:
     fields = "name"
-    if isinstance(description, InputBlock | Hidden):
-        fields += " soft_assignments"
-    if isinstance(description, Hidden):
+    if isinstance(description, Hidden | ClassificationHead):
         fields += " initial_widths"
     if isinstance(description, RegressionHead):
         fields += " has_output_weights"
     data = record(value, fields)
     if data["name"] != description.name:
         raise ValueError("saved block identity does not match the Recipe")
-    soft = False
     if isinstance(description, InputBlock | Hidden):
-        soft = boolean(data["soft_assignments"])
-        if soft != _is_soft(description.epsilon, schema.computation_dtype):
-            raise ValueError("saved affiliation regime is inconsistent with the fitted model")
         K = dict(schema.K_active)[description.name]
         # Empty coordinates represent absent row payload, not a fitting session.
         gamma = (
@@ -452,14 +450,14 @@ def _decode_fitted_block(
             else torch.empty((0, K), dtype=schema.computation_dtype, device=reader.device)
         )
     if isinstance(description, InputBlock):
-        return _decode_input(description, key, reader, schema, soft, gamma)
+        return _decode_input(description, key, reader, schema, gamma)
     (connection,) = built.incoming[description.name]
     if isinstance(description, Hidden):
-        return _decode_hidden(description, data, key, reader, schema, connection, soft, gamma)
+        return _decode_hidden(description, data, key, reader, schema, connection, gamma)
     source_clusters = dict(schema.K_active)[connection.source]
     match description:
         case ClassificationHead():
-            return _decode_classification(description, key, reader, schema, source_clusters)
+            return _decode_classification(description, data, key, reader, schema, source_clusters)
         case RegressionHead():
             return _decode_regression(description, data, key, reader, schema, source_clusters)
         case _:

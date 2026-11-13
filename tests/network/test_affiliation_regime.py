@@ -1,4 +1,4 @@
-"""The affiliation regime depends on the temperature and the dtype, not on the row count."""
+"""A configured affiliation regime stays independent of the row count."""
 
 import math
 

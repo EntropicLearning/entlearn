@@ -58,6 +58,7 @@ def plot_decision(
     are held at their medians over ``X``, and each categorical feature at its most
     frequent category. When the network learned instance weights, a second
     panel shows ``network.score_samples`` over the same grid.
+    Both panels keep the same feature ranges and equal x and y scales when resized.
 
     Args:
         network: A fitted classification network.
@@ -82,8 +83,9 @@ def plot_decision(
         torch.linspace(float(low[i]), float(high[i]), resolution, dtype=X.dtype) for i in (0, 1)
     ]
     gx, gy = torch.meshgrid(*along, indexing="xy")
-    grid = X.median(dim=0).values.repeat(gx.numel(), 1)
-    grid[:, first], grid[:, second] = gx.flatten().to(X.device), gy.flatten().to(X.device)
+    grid = X.cpu().median(dim=0).values.repeat(gx.numel(), 1)
+    grid[:, first], grid[:, second] = gx.flatten(), gy.flatten()
+    grid = grid.to(X.device)
     grid_cat = None
     if X_cat is not None:
         grid_cat = [codes.mode().values.repeat(len(grid)) for codes in X_cat]
@@ -167,7 +169,21 @@ def plot_decision(
             row=1,
             col=col,
         )
-        fig.update_xaxes(title_text=f"feature {first}", range=[xs[0], xs[-1]], row=1, col=col)
-        fig.update_yaxes(title_text=f"feature {second}", range=[ys[0], ys[-1]], row=1, col=col)
+        # Image traces shrink their domain by default; contours would expand the range.
+        fig.update_xaxes(
+            title_text=f"feature {first}",
+            range=[xs[0], xs[-1]],
+            constrain="domain",
+            row=1,
+            col=col,
+        )
+        fig.update_yaxes(
+            title_text=f"feature {second}",
+            range=[ys[0], ys[-1]],
+            constrain="domain",
+            row=1,
+            col=col,
+        )
         _equal_aspect(fig, 1, col)
+    fig.update_layout(showlegend=False)
     return fig

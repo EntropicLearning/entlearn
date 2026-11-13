@@ -1,11 +1,13 @@
 """Behaviour tests for input initialisation."""
 
+import math
 from collections import Counter
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET
 from network._fixtures import (
+    blobs,
     classification_recipe,
     continuous_classification_data,
 )
@@ -14,15 +16,26 @@ from entlearn import (
     InitialState,
     Input,
     Network,
-    Recipe,
-    RegressionHead,
 )
+from entlearn.network.initialisation import centroids
 from entlearn.network.initialisation.balanced import allocate_balanced_seeds
 from entlearn.network.initialisation.centroids import (
+    _cumsum_rows,
     _greedy_candidate,
-    _uniform_unchosen_pick,
-    _weighted_choice,
+    _weighted_draws,
+    select_kmeanspp_seeds_,
 )
+from entlearn.primitives.distance import dissimilarity_to_rows
+
+
+@pytest.fixture
+def nondeterministic():
+    """Allow the CUDA kernels whose results vary from run to run, as a user's session does."""
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(False)
+    yield
+    torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
 
 
 def _classification_recipe(input_block: Input):
@@ -98,16 +111,16 @@ class TestFeatureWeightInitialisation:
             _initialise(Input(K=2, W_std=0.8), feature_weights=torch.ones(2, dtype=torch.float64))
 
     @pytest.mark.parametrize(
-        "weights",
+        ("weights", "reason"),
         (
-            pytest.param(torch.tensor([1.0]), id="wrong-width"),
-            pytest.param(torch.tensor([0.0, 0.0]), id="zero-mass"),
-            pytest.param(torch.tensor([-1.0, 2.0]), id="negative"),
-            pytest.param(torch.tensor([float("nan"), 1.0]), id="non-finite"),
+            pytest.param(torch.tensor([1.0]), "length-2", id="wrong-width"),
+            pytest.param(torch.tensor([0.0, 0.0]), "positive total mass", id="zero-mass"),
+            pytest.param(torch.tensor([-1.0, 2.0]), "non-negative", id="negative"),
+            pytest.param(torch.tensor([float("nan"), 1.0]), "only finite", id="non-finite"),
         ),
     )
-    def test_supplied_weights_must_define_a_valid_feature_simplex(self, weights):
-        with pytest.raises(ValueError, match="feature_weights"):
+    def test_supplied_weights_must_define_a_valid_feature_simplex(self, weights, reason):
+        with pytest.raises(ValueError, match=f"feature_weights .*{reason}"):
             _initialise(Input(K=2), feature_weights=weights.to(dtype=torch.float64))
 
 
@@ -145,34 +158,6 @@ class TestGlobalCentroidInitialisation:
             X_cont, greedy.input_geometry.continuous_centroids, sample_weights
         ) < _seeding_potential(X_cont, standard.input_geometry.continuous_centroids, sample_weights)
 
-    def test_fixed_greedy_candidates_reuse_a_wider_selection_prefix(self):
-        generator = torch.Generator().manual_seed(8)
-        X_cont = torch.rand(24, 3, generator=generator, dtype=torch.float64)
-        y = torch.arange(24) % 2
-        narrow = _classification_recipe(
-            Input(
-                K=3,
-                centroid_strategy="greedy-kmeans++",
-                greedy_candidates=3,
-            )
-        )
-        wide = _classification_recipe(
-            Input(
-                K=6,
-                centroid_strategy="greedy-kmeans++",
-                greedy_candidates=3,
-            )
-        )
-
-        narrow_state = Network.initialise(narrow, X_cont, y, seed=12)
-        wide_state = Network.initialise(wide, X_cont, y, seed=12)
-
-        assert narrow_state.input_geometry.prefix_reusable
-        assert torch.equal(
-            narrow_state.input_geometry.continuous_centroids,
-            wide_state.input_geometry.continuous_centroids[: narrow_state.input_geometry.K_active],
-        )
-
     def test_the_default_greedy_candidate_count_is_two_plus_floor_log_k(self):
         X_cont = torch.rand(40, 3, generator=torch.Generator().manual_seed(8), dtype=DTYPE)
         X_cont = X_cont.to(DEVICE)
@@ -187,11 +172,6 @@ class TestGlobalCentroidInitialisation:
 
         # 2 + floor(log 8) = 4 candidates per seed.
         assert torch.equal(centroids(), centroids(greedy_candidates=4))
-
-    def test_k_dependent_greedy_candidates_reject_prefix_reuse(self):
-        state = _initialise(Input(K=2, centroid_strategy="greedy-kmeans++"), seed=5)
-
-        assert not state.input_geometry.prefix_reusable
 
     def test_sample_weights_control_the_first_centroid(self):
         X_cont, y = continuous_classification_data()
@@ -208,7 +188,89 @@ class TestGlobalCentroidInitialisation:
         assert torch.equal(state.input_geometry.continuous_centroids[0], X_cont[2])
 
 
+class TestGreedyCandidate:
+    def test_the_winning_candidate_gives_each_row_its_nearest_seed_dissimilarity(self):
+        X = torch.tensor([[0.0], [0.1], [1.0]], dtype=DTYPE, device=DEVICE)
+        d2 = torch.tensor([0.0, 0.01, 1.0], dtype=DTYPE, device=DEVICE)  # seed row 0 chosen
+        dissimilarity = dissimilarity_to_rows(
+            X,
+            [],
+            torch.ones(1, dtype=DTYPE, device=DEVICE),
+            torch.zeros(0, dtype=DTYPE, device=DEVICE),
+        )
+
+        # Row 1 leaves the potential at 0.81, row 2 at d2[1] = 0.01.
+        best, updated, column = _greedy_candidate(
+            dissimilarity,
+            torch.ones(3, dtype=DTYPE, device=DEVICE),
+            d2[None],
+            torch.tensor([[1, 2]], device=DEVICE),
+        )
+
+        assert best.tolist() == [[2]]
+        assert torch.equal(updated, torch.tensor([[0.0, 0.01, 0.0]], dtype=DTYPE, device=DEVICE))
+        torch.testing.assert_close(
+            column, torch.tensor([[1.0, 0.81, 0.0]], dtype=DTYPE, device=DEVICE)
+        )
+
+
+class TestCategoricalCodeSeeding:
+    def test_codes_seed_exactly_as_their_one_hot_distributions(self):
+        # A code row's cross-entropy to a seed is a lookup, so seeding from the codes must
+        # choose the same rows as seeding from their one-hot rows, and start the categorical
+        # centroids at those rows' one-hot codes.
+        g = torch.Generator().manual_seed(5)
+        X_cont = torch.rand(300, 4, generator=g, dtype=DTYPE).to(DEVICE)
+        codes = [torch.randint(0, m, (300,), generator=g).to(DEVICE) for m in (2, 5)]
+        one_hot = [
+            torch.nn.functional.one_hot(c, m).to(DTYPE) for c, m in zip(codes, (2, 5), strict=True)
+        ]
+        y = torch.arange(300, device=DEVICE) % 2
+        recipe = _classification_recipe(Input(K=12, centroid_strategy="greedy-kmeans++", W_std=0.5))
+
+        from_codes = Network.initialise(recipe, X_cont, y, X_cat=codes, seed=7).input_geometry
+        from_rows = Network.initialise(recipe, X_cont, y, X_cat=one_hot, seed=7).input_geometry
+
+        assert torch.equal(from_codes.continuous_centroids, from_rows.continuous_centroids)
+        rows = (from_codes.continuous_centroids[:, None] == X_cont).all(dim=2).nonzero()[:, 1]
+        for coded, rows_one_hot in zip(from_codes.categorical_centroids, one_hot, strict=True):
+            assert torch.equal(coded, rows_one_hot[rows])
+
+
 class TestWeightedRowDraw:
+    @pytest.mark.parametrize("rows", (1, 3))
+    @pytest.mark.parametrize("n", (1, 2, 1_000, 1_000_003))
+    def test_the_cumulative_sums_repeat(self, nondeterministic, rows, n):
+        generator = torch.Generator().manual_seed(n)
+        weights = torch.rand(rows, n, generator=generator, dtype=DTYPE).to(DEVICE)
+
+        cumulative = _cumsum_rows(weights)
+
+        assert all(torch.equal(cumulative, _cumsum_rows(weights)) for _ in range(8))
+        torch.testing.assert_close(
+            cumulative.double().cpu(),
+            weights.double().cpu().cumsum(dim=1),
+            rtol=8 * math.isqrt(n) * torch.finfo(DTYPE).eps,
+            atol=0,
+        )
+
+    # Cover both direct row scans and the square-based scan for long rows.
+    # Separately summed row offsets can cause decreases at square-row boundaries.
+    # A single input row also exercises the duplication that avoids CUDA's 1-D scan.
+    @pytest.mark.parametrize("rows", (1, 3))
+    @pytest.mark.parametrize("n", (3_000, 3_000_000))
+    def test_the_cumulative_sums_never_fall_and_are_flat_at_zero_weights(
+        self, nondeterministic, rows, n
+    ):
+        generator = torch.Generator().manual_seed(0)
+        weights = torch.rand(rows, n, generator=generator, dtype=DTYPE)
+        weights[torch.rand(rows, n, generator=generator) < 0.3] = 0.0
+
+        steps = _cumsum_rows(weights.to(DEVICE)).diff(dim=1).cpu()
+
+        assert (steps >= 0).all()
+        assert (steps[weights[:, 1:] == 0] == 0).all()
+
     def test_zero_weight_rows_are_never_drawn_when_the_total_mass_underflows(self):
         # The k-means++ mass left after the chosen rows are zeroed can be subnormal, and
         # scaling a uniform draw by it then underflows to exactly zero. Every such draw
@@ -217,43 +279,242 @@ class TestWeightedRowDraw:
         weights = torch.tensor([0.0, 1.0, 0.0], dtype=DTYPE, device=DEVICE) * smallest
         generator = torch.Generator(device=DEVICE).manual_seed(0)
 
-        drawn = _weighted_choice(weights, generator, 64)
+        drawn = _weighted_draws(weights[None], [generator], 64)
 
         assert torch.equal(drawn, torch.ones_like(drawn))
 
 
+def _draw_batched_seeds(seeds: list[int], n_candidates: int, rows: int = 400) -> torch.Tensor:
+    """Draw 12 centroid rows per random seed using continuous and categorical-code features."""
+    g = torch.Generator().manual_seed(9)
+    X = torch.rand(rows, 3, generator=g, dtype=DTYPE).to(DEVICE)
+    codes = torch.randint(0, 4, (rows,), generator=g).to(DEVICE)
+    generators = [torch.Generator(device=DEVICE).manual_seed(seed) for seed in seeds]
+    Wd = torch.full((4,), 0.25, dtype=DTYPE, device=DEVICE)
+    weights = torch.rand(rows, generator=g, dtype=DTYPE).to(DEVICE)
+    return select_kmeanspp_seeds_(
+        None, X, [codes], 12, generators, Wd[:3], Wd[3:], weights, n_candidates=n_candidates
+    )
+
+
+class TestBatchedSeeding:
+    @pytest.mark.parametrize("n_candidates", (1, 3), ids=("standard", "greedy"))
+    def test_each_generator_draws_its_seeds_whatever_the_others_draw(self, n_candidates):
+        # Generators seeded together share every product, so changing one generator's seed
+        # must change its own seeds and leave every other generator's seeds as they were.
+        first = _draw_batched_seeds([1, 2, 3], n_candidates)
+        assert all(len(set(row.tolist())) == 12 for row in first)
+        for changed in range(3):
+            seeds = [1, 2, 3]
+            seeds[changed] = 20
+            other = _draw_batched_seeds(seeds, n_candidates)
+            kept = [i for i in range(3) if i != changed]
+            assert torch.equal(other[kept], first[kept])
+            assert not torch.equal(other[changed], first[changed])
+
+    @pytest.mark.parametrize("n_candidates", (1, 3), ids=("standard", "greedy"))
+    def test_the_seeds_repeat_from_run_to_run(self, nondeterministic, n_candidates):
+        # On CUDA without deterministic algorithms, a draw built on an operation that varies
+        # from run to run (an atomic sum, say) moves seeds at this many rows.
+        rows = 100_000 if str(DEVICE).startswith("cuda") else 400
+
+        first = _draw_batched_seeds(list(range(16)), n_candidates, rows)
+        repeated = [_draw_batched_seeds(list(range(16)), n_candidates, rows) for _ in range(4)]
+
+        assert all(torch.equal(seeds, first) for seeds in repeated)
+
+    def test_each_plain_seed_is_drawn_against_its_nearest_chosen_seed(self):
+        # Three tight clusters on a line: once two hold a seed, only the third carries mass.
+        # Drawing against the first seed alone would often put two seeds in one cluster.
+        centres = torch.tensor([0.0, 0.5, 1.0], dtype=DTYPE).repeat_interleave(20)
+        noise = 1e-3 * torch.rand(60, generator=torch.Generator().manual_seed(0), dtype=DTYPE)
+        X = (centres + noise).to(DEVICE)[:, None]
+        weights = torch.ones(60, dtype=DTYPE, device=DEVICE)
+        generators = [torch.Generator(device=DEVICE).manual_seed(s) for s in range(64)]
+
+        seeds = select_kmeanspp_seeds_(
+            None, X, [], 3, generators, weights[:1], weights[:0], weights
+        )
+
+        assert all(sorted(row) == [0, 1, 2] for row in (seeds // 20).tolist())
+
+    @FIXED_BUDGET
+    def test_each_candidate_draws_with_its_own_feature_weights(self):
+        # Random feature weights differ between candidates, so pricing a candidate's draws
+        # with another candidate's weights would move its centroids away from its seed's.
+        X, y = blobs(2, 0.1, rows_per_blob=50)
+        recipe = _classification_recipe(Input(K=6, W_std=0.5))
+
+        network = Network.fit(recipe, X, y, n_inits=3, retain="states", max_iter=1)
+
+        outcomes = network.diagnostics.initialisation_outcomes
+        assert outcomes is not None
+        for state, outcome in zip(network.initial_states, outcomes, strict=True):
+            expected = Network.initialise(recipe, X, y, seed=outcome.seed).input_geometry
+            centroids = state.input_geometry.continuous_centroids
+            assert torch.equal(centroids, expected.continuous_centroids)
+
+    @FIXED_BUDGET
+    def test_a_candidates_state_does_not_depend_on_the_number_of_initialisations(self, monkeypatch):
+        # Kernels chosen by a product's width can round a candidate's dissimilarities
+        # differently beside more candidates. An offset that grows with the width stands in
+        # for that rounding, so the states agree only if every pass has the same width.
+        priced = centroids.dissimilarity_to_rows
+
+        def width_dependent(*args):
+            dissimilarity = priced(*args)
+            return lambda seeds: dissimilarity(seeds) + 0.05 * seeds.numel()
+
+        monkeypatch.setattr(centroids, "dissimilarity_to_rows", width_dependent)
+        X, y = blobs(2, 0.1, rows_per_blob=60)
+        recipe = _classification_recipe(Input(K=6))
+
+        def states(n_inits, seed=0):
+            network = Network.fit(
+                recipe, X, y, n_inits=n_inits, retain="states", max_iter=1, seed=seed
+            )
+            outcomes = network.diagnostics.initialisation_outcomes
+            return [
+                (outcome.seed, state.input_geometry.continuous_centroids)
+                for outcome, state in zip(outcomes, network.initial_states, strict=True)
+            ]
+
+        two, ten = states(2), states(10)
+        for (seed, drawn), (seed_ten, drawn_ten) in zip(two, ten[:2], strict=True):
+            assert seed == seed_ten and torch.equal(drawn, drawn_ten)
+        for seed, drawn in ten[:3]:  # replaying a candidate's seed alone draws its state
+            ((replayed_seed, replayed),) = states(1, seed=seed)
+            alone = Network.initialise(recipe, X, y, seed=seed).input_geometry
+            assert replayed_seed == seed and torch.equal(replayed, drawn)
+            assert torch.equal(alone.continuous_centroids, drawn)
+
+
 class TestDegenerateSeedFallback:
-    def test_every_unchosen_row_is_reachable_and_only_the_generator_decides(self):
-        # The fallback runs once the weighted draw has no mass left, so it must spread
-        # over every unchosen row and still be reproducible from the supplied generator.
-        chosen = torch.tensor([0], dtype=torch.int64, device=DEVICE)
+    def test_every_unchosen_row_is_reachable_and_only_the_generators_decide(self):
+        # Identical rows leave no weighted mass after the first seed, so the fallback must
+        # spread each later seed over the rows not yet chosen and repeat from the same generators.
+        X = torch.full((6, 1), 0.5, dtype=DTYPE, device=DEVICE)
+        weights = torch.ones(6, dtype=DTYPE, device=DEVICE)
 
-        def picks(seed: int) -> list[int]:
-            generator = torch.Generator(device=DEVICE).manual_seed(seed)
-            return [_uniform_unchosen_pick(chosen, 1, 6, generator, DTYPE) for _ in range(64)]
+        def picks() -> torch.Tensor:
+            generators = [torch.Generator(device=DEVICE).manual_seed(s) for s in range(64)]
+            return select_kmeanspp_seeds_(
+                None, X, [], 6, generators, weights[:1], weights[:0], weights
+            )
 
-        first = picks(11)
-        assert set(first) == {1, 2, 3, 4, 5}
+        first = picks()
+        assert all(sorted(row) == list(range(6)) for row in first.tolist())
+        assert set(first[:, 1].tolist()) == set(range(6))
         torch.rand(1, device=DEVICE)
-        assert picks(11) == first
+        assert torch.equal(picks(), first)
 
     def test_the_first_greedy_candidate_wins_a_tie(self):
         # Identical rows give every candidate the same potential, so the draw order alone
         # decides and the documented first-wins rule must hold.
         X = torch.full((3, 1), 0.5, dtype=DTYPE, device=DEVICE)
-
-        best = _greedy_candidate(
+        dissimilarity = dissimilarity_to_rows(
             X,
-            [],
             [],
             torch.ones(1, dtype=DTYPE, device=DEVICE),
             torch.zeros(0, dtype=DTYPE, device=DEVICE),
-            torch.ones(3, dtype=DTYPE, device=DEVICE),
-            torch.zeros(3, dtype=DTYPE, device=DEVICE),
-            torch.tensor([2, 0, 1], dtype=torch.int64, device=DEVICE),
         )
 
-        assert best == 2
+        best, d2, column = _greedy_candidate(
+            dissimilarity,
+            torch.ones(3, dtype=DTYPE, device=DEVICE),
+            torch.zeros(1, 3, dtype=DTYPE, device=DEVICE),
+            torch.tensor([[2, 0, 1]], dtype=torch.int64, device=DEVICE),
+        )
+
+        assert best.tolist() == [[2]]
+        assert torch.equal(d2, torch.zeros(1, 3, dtype=DTYPE, device=DEVICE))
+        assert torch.equal(column, d2)
+
+
+class TestSeedColumns:
+    @pytest.mark.parametrize("n_candidates", [1, 3])
+    def test_each_column_is_every_rows_dissimilarity_to_its_seed(self, n_candidates):
+        # Connection seeding assigns rows by these columns, so each must be its seed's
+        # dissimilarity, and asking for them must leave the draw alone.
+        generator = torch.Generator().manual_seed(0)
+        X = torch.rand(40, 3, generator=generator, dtype=torch.float64).to(DEVICE, DTYPE)
+        levels = 0.1 + torch.rand(40, 4, generator=generator, dtype=torch.float64)
+        X_cat = [(levels / levels.sum(dim=1, keepdim=True)).to(DEVICE, DTYPE)]
+        Wd_cont = torch.tensor([0.1, 0.2, 0.3], dtype=DTYPE, device=DEVICE)
+        Wd_cat = torch.tensor([0.4], dtype=DTYPE, device=DEVICE)
+
+        def draw(columns=None):
+            return select_kmeanspp_seeds_(
+                columns,
+                X,
+                X_cat,
+                6,
+                [torch.Generator(device=DEVICE).manual_seed(seed) for seed in (5, 7, 11)],
+                Wd_cont,
+                Wd_cat,
+                torch.ones(40, dtype=DTYPE, device=DEVICE),
+                n_candidates=n_candidates,
+            )
+
+        columns = torch.empty(3, 40, 6, dtype=DTYPE, device=DEVICE)
+        seeds = draw(columns)
+
+        assert torch.equal(seeds, draw())
+        for batch, selected in enumerate(seeds):
+            continuous = (Wd_cont * (X.unsqueeze(1) - X[selected]) ** 2).sum(dim=2)
+            cross_entropy = -X_cat[0] @ X_cat[0][selected].log().T
+            torch.testing.assert_close(columns[batch], continuous + Wd_cat * cross_entropy)
+
+    def test_greedy_columns_reuse_the_scored_candidates(self, monkeypatch):
+        batches = []
+        original = centroids.dissimilarity_to_rows
+
+        def track_dissimilarity(*args):
+            dissimilarity = original(*args)
+
+            def tracked(seeds):
+                batches.append(seeds.numel())
+                return dissimilarity(seeds)
+
+            return tracked
+
+        monkeypatch.setattr(centroids, "dissimilarity_to_rows", track_dissimilarity)
+        X = torch.arange(8, dtype=DTYPE, device=DEVICE).unsqueeze(1) / 8
+        columns = X.new_empty(3, 8, 4)
+
+        select_kmeanspp_seeds_(
+            columns,
+            X,
+            [],
+            4,
+            [torch.Generator(device=DEVICE).manual_seed(seed) for seed in (5, 7, 11)],
+            X.new_ones(1),
+            X.new_empty(0),
+            X.new_ones(8),
+            n_candidates=3,
+        )
+
+        assert batches == [3, 9, 9, 9]
+
+    @pytest.mark.parametrize("n_candidates", [1, 3])
+    def test_degenerate_fallback_writes_every_seed_column(self, n_candidates):
+        X = torch.full((4, 1), 0.5, dtype=DTYPE, device=DEVICE)
+        columns = X.new_full((3, 4, 4), torch.nan)
+
+        seeds = select_kmeanspp_seeds_(
+            columns,
+            X,
+            [],
+            4,
+            [torch.Generator(device=DEVICE).manual_seed(seed) for seed in (5, 7, 11)],
+            X.new_ones(1),
+            X.new_empty(0),
+            X.new_ones(4),
+            n_candidates=n_candidates,
+        )
+
+        assert torch.equal(seeds.sort(dim=1).values, torch.arange(4, device=DEVICE).expand(3, -1))
+        assert torch.equal(columns, torch.zeros_like(columns))
 
 
 class TestBalancedCentroidInitialisation:
@@ -358,10 +619,14 @@ class TestBalancedCentroidInitialisation:
             dtype=torch.float64,
         )
 
+        # The [0, 1] rows carry almost no weight, so a tie rule that sent the [0.5, 0.5] rows
+        # to class 1 would seed both of them; the lowest-class rule seeds one of each pair.
+        sample_weights = torch.tensor([1.0, 1e-30, 1.0, 1.0, 1e-30], dtype=torch.float64)
         state = Network.initialise(
             _classification_recipe(Input(K=2, balanced=True)),
             X_cont,
             y,
+            sample_weights=sample_weights,
             seed=3,
         )
 
@@ -423,10 +688,6 @@ class TestBalancedCentroidInitialisation:
         )
 
         assert _selected_class_counts(state, X_cont, y) == Counter({0: 2, 1: 1})
-
-    def test_regression_rejects_balanced_allocation(self):
-        with pytest.raises(ValueError, match="balanced"):
-            Recipe.chain(Input(K=2, balanced=True), RegressionHead())
 
 
 class TestSuppliedCentroidInitialisation:
@@ -497,21 +758,24 @@ class TestSuppliedCentroidInitialisation:
             )
 
     @pytest.mark.parametrize(
-        "continuous",
+        ("continuous", "reason"),
         (
-            pytest.param(torch.zeros(1, 2, dtype=torch.float64), id="wrong-size"),
+            pytest.param(
+                torch.zeros(1, 2, dtype=torch.float64), r"shape \(2, 2\)", id="wrong-size"
+            ),
             pytest.param(
                 torch.tensor([[0.0, float("inf")], [1.0, 1.0]], dtype=torch.float64),
+                "only finite",
                 id="non-finite",
             ),
         ),
     )
-    def test_supplied_continuous_centroids_must_be_valid(self, continuous):
-        with pytest.raises(ValueError, match="continuous_centroids"):
+    def test_supplied_continuous_centroids_must_be_valid(self, continuous, reason):
+        with pytest.raises(ValueError, match=f"continuous_centroids .*{reason}"):
             _initialise(Input(K=2), continuous_centroids=continuous)
 
     def test_integer_continuous_centroids_are_rejected_even_with_a_computation_dtype(self):
-        with pytest.raises(ValueError, match="continuous_centroids must be a floating tensor with"):
+        with pytest.raises(ValueError, match="continuous_centroids must be a floating tensor"):
             _initialise(
                 Input(K=2),
                 continuous_centroids=torch.zeros(2, 2, dtype=torch.int64),
@@ -523,17 +787,17 @@ class TestSuppliedCentroidInitialisation:
         (
             pytest.param(
                 [torch.tensor([[2.0, -1.0], [1.0, 1.0]], dtype=torch.float64)],
-                "must be non-negative",
+                "non-negative",
                 id="negative",
             ),
             pytest.param(
                 [torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float64)],
-                "rows must have finite positive mass",
+                "finite positive mass",
                 id="zero-mass",
             ),
             pytest.param(
                 [torch.tensor([[1.0, float("nan")], [1.0, 1.0]], dtype=torch.float64)],
-                "must contain only finite values",
+                "only finite values",
                 id="non-finite",
             ),
         ),
@@ -543,7 +807,7 @@ class TestSuppliedCentroidInitialisation:
         X_cat = [torch.tensor([0, 1, 0, 1])]
         y = torch.tensor([0, 0, 1, 1])
 
-        with pytest.raises(ValueError, match=rf"categorical_centroids\[0\] {message}"):
+        with pytest.raises(ValueError, match=rf"categorical_centroids\[0\] .*{message}"):
             Network.initialise(
                 _classification_recipe(Input(K=2)),
                 X_cont,
@@ -558,37 +822,37 @@ class TestSuppliedCentroidInitialisation:
             pytest.param(
                 False,
                 lambda c: {"continuous_centroids": c},
-                "continuous_centroids were supplied for an input without continuous data",
+                r"continuous_centroids .*without continuous data",
                 id="no-continuous-features",
             ),
             pytest.param(
                 True,
                 lambda c: {"categorical_centroids": [c]},
-                "categorical_centroids were supplied for an input without categorical data",
+                r"categorical_centroids .*without categorical data",
                 id="no-categorical-features",
             ),
             pytest.param(
                 False,
                 lambda c: {"categorical_centroids": "ab"},
-                "categorical_centroids must be a sequence of tensors",
+                r"categorical_centroids .*sequence of tensors",
                 id="string",
             ),
             pytest.param(
                 False,
                 lambda c: {"categorical_centroids": c},
-                "categorical_centroids must be a sequence of tensors",
+                r"categorical_centroids .*sequence of tensors",
                 id="tensor",
             ),
             pytest.param(
                 False,
                 lambda c: {"categorical_centroids": [c, c]},
-                r"categorical_centroids has 2 feature\(s\), but the input has 1",
+                r"has 2 feature\(s\), but the input has 1",
                 id="feature-count",
             ),
             pytest.param(
                 True,
                 lambda c: {"continuous_centroids": c[:, :1].tolist()},
-                "continuous_centroids must be a floating tensor$",
+                r"continuous_centroids .*floating tensor",
                 id="non-tensor",
             ),
         ),

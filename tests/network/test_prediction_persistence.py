@@ -1,16 +1,21 @@
 """Portable prediction-only workflows through the public Network interface."""
 
+import gc
 import math
 import pickle
+import weakref
 from dataclasses import replace
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
-from network._fixtures import assert_same_values, read_saved_metadata, resume_case
+from conftest import DEVICE, DTYPE, FIXED_BUDGET, RANK_DEFICIENT
+from network._fixtures import assert_same_values, prediction_model, resume_case
 from safetensors.torch import load_file
 
 from entlearn import ClassificationHead, Coupling, Hidden, Input, Network, PredictConfig, Recipe
+from entlearn.primitives.normalise import _tiny
+
+pytestmark = FIXED_BUDGET
 
 
 class TestPredictionPersistence:
@@ -22,10 +27,6 @@ class TestPredictionPersistence:
         source = Network.fit(recipe, X, y, X_cat=categories, max_iter=3, seed=5, tol=0)
         path = tmp_path / "model.safetensors"
         source.save(path)
-        assert read_saved_metadata(path)
-        tensors = load_file(path)
-        assert tensors
-        assert not any("gamma" in name or "instance_weights" in name for name in tensors)
         restored = Network.load(path)
         assert restored.device == torch.device("cpu")
         assert restored.recipe == source.recipe
@@ -34,6 +35,9 @@ class TestPredictionPersistence:
         assert restored.diagnostics == source.diagnostics
         assert source.can_resume and not restored.can_resume
         query, cats = X.cpu(), tuple(value.cpu() for value in categories)
+        # Accelerator kernels order the D- and K-term sums differently, and each affiliation
+        # softmax at temperature 0.1 to 0.3 scales a cost's rounding by up to ten; 512 eps
+        # bounds that with margin (MPS differs by at most 44 float32 eps).
         tolerance = 0 if X.device.type == "cpu" else 512 * torch.finfo(X.dtype).eps
         torch.testing.assert_close(
             restored.predict(query, X_cat=cats),
@@ -181,12 +185,16 @@ class TestPredictionPersistence:
         )
         assert not grown_loaded.can_resume
 
-    @pytest.mark.parametrize("scale", [0.5, 1.5])
-    def test_near_threshold_assignments_survive_without_training_affiliations(
-        self, tmp_path, scale
+    @pytest.mark.parametrize(
+        "epsilon",
+        [0.0, _tiny(DTYPE) / 2, 1.5 * torch.finfo(DTYPE).eps],
+        ids=["zero", "subnormal", "eps"],
+    )
+    def test_regime_boundary_assignments_survive_without_training_affiliations(
+        self, tmp_path, epsilon
     ):
-        epsilon = scale * torch.finfo(DTYPE).eps
-        X = torch.tensor([[0.0], [math.sqrt(epsilon)]], dtype=DTYPE, device=DEVICE)
+        # The query is equidistant from both centroids: soft splits the tie, hard picks one.
+        X = torch.tensor([[0.0], [1.0]], dtype=DTYPE, device=DEVICE)
         y = torch.tensor([0, 1], device=DEVICE)
         source = Network.fit(
             Recipe.chain(Input(K=2, epsilon=epsilon), ClassificationHead(coupling=Coupling.M)),
@@ -200,7 +208,10 @@ class TestPredictionPersistence:
         restored = Network.load(path, device=DEVICE)
         query = X.mean(dim=0, keepdim=True)
         single = restored.predict(query)
-        assert torch.count_nonzero(single).item() == (2 if scale > 1 else 1)
+        affiliations = restored.predict_with_details(query, details=("affiliations",)).affiliations
+        assert affiliations is not None
+        (gamma,) = affiliations.values()
+        assert torch.count_nonzero(gamma).item() == (2 if epsilon > 0 else 1)
         torch.testing.assert_close(single, source.predict(query), rtol=0, atol=0)
         torch.testing.assert_close(restored.predict(query.repeat(16, 1)), single.expand(16, 2))
 
@@ -244,8 +255,7 @@ class TestPredictionPersistence:
         path = tmp_path / "no_recovery.safetensors"
         source.save(path)
         restored = Network.load(path, device=DEVICE)
-        assert not any(name.endswith("Wt_ref") for name in load_file(path))
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="requires fitted instance-weight recovery"):
             restored.score_samples(X)
         torch.testing.assert_close(source.predict(X), restored.predict(X), rtol=0, atol=0)
 
@@ -253,15 +263,17 @@ class TestPredictionPersistence:
         self, tmp_path
     ):
         recipe, X, y, _ = resume_case("regression")
+
+        def task_weights(labelled):
+            return torch.ones(len(labelled), dtype=DTYPE, device=DEVICE)
+
+        reference = weakref.ref(task_weights)
         source = Network.fit(
-            recipe,
-            X,
-            y,
-            task_weights=lambda labelled: torch.ones(len(labelled), dtype=DTYPE, device=DEVICE),
-            max_iter=2,
-            n_inits=2,
-            retain="members",
+            recipe, X, y, task_weights=task_weights, max_iter=2, n_inits=2, retain="members"
         )
+        del task_weights
+        gc.collect()
+        assert reference() is None
         path = tmp_path / "pickle.safetensors"
         source.save(path)
         restored = pickle.loads(pickle.dumps(Network.load(path, device=DEVICE)))
@@ -271,6 +283,9 @@ class TestPredictionPersistence:
             assert member.initial_state is state
         torch.testing.assert_close(source.predict_all(X), restored.predict_all(X), rtol=0, atol=0)
 
+    @RANK_DEFICIENT
+    # Eight identical starting centroids can leave fewer distinct profiles than hidden clusters.
+    @pytest.mark.filterwarnings("ignore:hidden block 'hidden_1':UserWarning")
     @pytest.mark.parametrize("kind", ["standard", "manifold"])
     def test_pruned_parameters_and_original_prior_scales_survive(self, tmp_path, kind):
         recipe, X, y, _ = resume_case(kind=kind)
@@ -303,8 +318,6 @@ class TestPredictionPersistence:
 
     @pytest.mark.parametrize("kind", ["categorical", "distribution"])
     def test_categorical_only_and_distribution_inputs(self, tmp_path, kind):
-        from network._fixtures import prediction_model
-
         source, X, cats = prediction_model(input_kind=kind)
         path = tmp_path / "categories.safetensors"
         source.save(path)

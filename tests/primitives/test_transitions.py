@@ -6,6 +6,7 @@ import pytest
 import torch
 from _alloc import assert_zero_alloc
 
+from entlearn.primitives.normalise import _tiny
 from entlearn.primitives.transitions import update_theta_
 from primitives._fixtures import SEEDS, assert_close, empty, generator, rand, stochastic
 
@@ -22,7 +23,7 @@ def _make(T, Kt, Ks, *, seed, weighted):
 
 def _ref(gamma_target, gamma_source, sw):
     """Naive implementation of update_theta_: weighted co-occurrence, lstoch, log."""
-    eps = torch.finfo(gamma_target.dtype).eps
+    tiny = _tiny(gamma_target.dtype)
     T, Kt = gamma_target.shape
     Ks = gamma_source.shape[1]
     theta = torch.zeros(Kt, Ks, dtype=gamma_target.dtype)
@@ -40,7 +41,7 @@ def _ref(gamma_target, gamma_source, sw):
     log_theta = torch.zeros(Kt, Ks, dtype=gamma_target.dtype)
     for kt in range(Kt):
         for ks in range(Ks):
-            log_theta[kt, ks] = math.log(max(float(theta[kt, ks]), eps))
+            log_theta[kt, ks] = math.log(max(float(theta[kt, ks]), tiny))
     return theta, log_theta
 
 
@@ -95,9 +96,9 @@ class TestUpdateTheta:
                     s += float(gamma_target[t, kt]) * float(gamma_source[t, ks])
                 counts[kt, ks] = s
         ref = counts / counts.sum(norm_dim, keepdim=True)  # every slice has positive mass
-        eps = torch.finfo(theta.dtype).eps
+        tiny = _tiny(theta.dtype)
         assert_close(theta, ref)
-        assert_close(log_theta, torch.log(torch.clamp_min(ref, eps)))
+        assert_close(log_theta, torch.log(torch.clamp_min(ref, tiny)))
         assert_close(
             theta.sum(norm_dim),
             torch.ones(Kt if norm_dim == 1 else Ks, dtype=theta.dtype),

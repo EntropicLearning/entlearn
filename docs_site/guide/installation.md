@@ -3,11 +3,6 @@
 Entlearn uses PyTorch and runs on CPU or supported accelerators.
 See `pyproject.toml` in the GitHub repository for the dependency requirements.
 
-!!! warn "This is a prerelease!"
-
-    The package is not yet on PyPI, so please install it from GitHub with `pip install git+https://github.com/EntropicLearning/entlearn` (or `uv add git+https://github.com/EntropicLearning/entlearn`).
-
-
 To install the package from PyPI run:
 
 ```bash
@@ -45,7 +40,7 @@ You can now [fit your first network](../tutorials/series.md#tutorial-1).
 ## Accelerators
 
 By default, everything is run on the CPU. 
-If you have a GPU that supports CUDA (meaning `torch.cuda.is_available()` returns `True`), you can use it by simply specifying it to the `device` argument of a `Network`.
+If you have a GPU that supports CUDA (meaning `torch.cuda.is_available()` returns `True`), you can use it instead: pass `device="cuda"` to an estimator, or place a `Network`'s input and target tensors on the GPU before fitting.
 
 Choose the device and floating-point precision explicitly:
 

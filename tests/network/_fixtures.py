@@ -27,12 +27,12 @@ from entlearn import (
 )
 from entlearn.network.blocks import input as inp
 from entlearn.network.blocks.hidden import _HiddenBlock
-from entlearn.network.blocks.input import _StandardInputBlock
+from entlearn.network.blocks.input import _resolve_delta_cat, _StandardInputBlock
 from entlearn.network.blocks.input_common import recover_instance_weights_
 from entlearn.network.build import _build_recipe, _BuiltRecipe
 from entlearn.network.connections import _ConnectionState
 from entlearn.network.data import _stage_data, _StagedData
-from entlearn.network.fit import _loss, _materialise, loss_noise_threshold
+from entlearn.network.fit import _loss, _materialise
 from entlearn.network.predict import _forward
 from entlearn.network.predict_init import seed_prediction_
 from entlearn.network.refine import _Refinement
@@ -96,11 +96,12 @@ def assert_same_checkpoint(actual, expected):
     assert actual.diagnostics == expected.diagnostics
     names = [
         "continuous_centroids",
-        "transition_matrices",
         "head_parameters",
         "training_affiliations",
         "training_instance_weights",
     ]
+    if any(isinstance(block, Hidden) for block in expected.recipe.blocks):
+        names.append("transition_matrices")
     names.append(
         "manifold_projectors"
         if isinstance(expected.recipe.blocks[0], ManifoldInput)
@@ -255,12 +256,13 @@ def deep_classification_recipe(
     head_coupling: Coupling = Coupling.M,
     epsilon: float = 0.2,
     theta_alpha: float = 1.0,
+    head_theta_alpha: float = 1.0,
 ) -> Recipe:
-    """Return a classification chain with explicit hidden and head couplings."""
+    """Return a classification chain with explicit hidden and head couplings and priors."""
     return Recipe.chain(
         Input(K=widths[0], epsilon=epsilon),
         *(Hidden(K=K, epsilon=epsilon) for K in widths[1:]),
-        ClassificationHead(coupling=head_coupling),
+        ClassificationHead(coupling=head_coupling, theta_alpha=head_theta_alpha),
         coupling=coupling,
         theta_alpha=theta_alpha,
     )
@@ -276,6 +278,22 @@ def connection_initialisation_data() -> tuple[torch.Tensor, torch.Tensor]:
         ),
         torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int64, device=DEVICE),
     )
+
+
+def outer_intervals_share_a_label() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return rows in three intervals, the interval centres, and codes 0, 1, 0 by interval."""
+    centres = torch.tensor([[0.05], [0.5], [0.95]], dtype=DTYPE, device=DEVICE)
+    offsets = torch.tensor([-0.05, 0.0, 0.05], dtype=DTYPE, device=DEVICE)
+    X_cont = (centres + offsets).reshape(-1, 1)
+    codes = torch.tensor([0, 0, 0, 1, 1, 1, 0, 0, 0], dtype=torch.int64, device=DEVICE)
+    return X_cont, centres, codes
+
+
+def banded_rows() -> tuple[torch.Tensor, torch.Tensor]:
+    """Return sixteen rows on a line in four bands whose codes alternate 0, 1, 0, 1."""
+    X_cont = torch.linspace(0.0, 1.0, 16, dtype=DTYPE, device=DEVICE)[:, None]
+    codes = torch.tensor([0, 1, 0, 1], dtype=torch.int64, device=DEVICE).repeat_interleave(4)
+    return X_cont, codes
 
 
 def continuous_classification_data() -> tuple[torch.Tensor, torch.Tensor]:
@@ -324,8 +342,11 @@ def resume_case(
     """
     X, codes = blobs(3, 0.2, rows_per_blob=10, n_features=3, seed=11)
     categories = (codes.remainder(2),) if kind == "categorical" else ()
+    # The manifold error is a mean over the three features, so its temperatures sit below the
+    # standard input's. These keep the hard predictions changing between the third and the
+    # eighth iteration in every coupling and task, on CPU and CUDA in both dtypes.
     first = (
-        ManifoldInput(K=4, subspace_dimension=1, epsilon=0.1, epsilon_T=0.3)
+        ManifoldInput(K=4, subspace_dimension=1, epsilon=0.02, epsilon_T=0.05)
         if kind == "manifold"
         else Input(K=4, epsilon=0.1, epsilon_D=0.2, epsilon_T=0.3)
     )
@@ -536,8 +557,11 @@ def noisy_regression_blobs() -> tuple[torch.Tensor, torch.Tensor]:
 
 def diverging_regression() -> tuple[Recipe, torch.Tensor, torch.Tensor]:
     """Return a regression case whose loss overflows, so its fit warns of a loss increase."""
-    X = torch.rand(30, 3, dtype=DTYPE, device=DEVICE)
-    y = torch.rand(30, dtype=DTYPE, device=DEVICE) * (torch.finfo(DTYPE).max ** 0.5 * 1e6)
+    # Draw on the CPU stream so every device lane fits the same data.
+    generator = torch.Generator().manual_seed(0)
+    X = torch.rand(30, 3, dtype=DTYPE, generator=generator).to(DEVICE)
+    y = torch.rand(30, dtype=DTYPE, generator=generator).to(DEVICE)
+    y *= torch.finfo(DTYPE).max ** 0.5 * 1e6
     recipe = Recipe.chain(Input(K=3, epsilon=0.1, epsilon_T=0.3), RegressionHead(epsilon_M=0.2))
     return recipe, X, y
 
@@ -548,6 +572,14 @@ def collapsed_reference_model() -> Network:
     return Network.fit(
         Recipe.chain(Input(K=1, epsilon_T=0.5), RegressionHead()), X, X[:, 0], max_iter=1
     )
+
+
+def skip_fit_iterations(monkeypatch) -> None:
+    """Make every fit iteration a no-op, so a fit publishes its starting state.
+
+    ``max_iter`` must be at least one, so this is the one route to the state before any update.
+    """
+    monkeypatch.setattr("entlearn.network.fit._fit_iteration_", lambda session: None)
 
 
 def stage(
@@ -572,7 +604,7 @@ def stage(
         task_weights=task_weights,
         computation_dtype=None,
     )
-    return built, data
+    return _build_recipe(_resolve_delta_cat(recipe, data)), data
 
 
 def materialise(
@@ -689,9 +721,17 @@ def deep_classification_session(
     )
 
 
-def assert_non_increasing(before: float, after: float, label: str = "") -> None:
-    """Assert one coordinate update did not raise the loss beyond round-off."""
-    threshold = loss_noise_threshold(before, DTYPE)
+# Allowed round-off error, expressed as a multiple of the dtype's machine precision.
+# This is independent of, and lower than, the solver's threshold in the package, so these
+# tests check that loss increases stay within this bound even if that threshold is lowered.
+LOSS_ROUND_OFF_EPS_MULTIPLE = 16
+
+
+def assert_non_increasing(
+    before: float, after: float, label: str = "", dtype: torch.dtype = DTYPE
+) -> None:
+    """Assert one update did not raise the loss beyond round-off."""
+    threshold = LOSS_ROUND_OFF_EPS_MULTIPLE * torch.finfo(dtype).eps * max(1.0, abs(before))
     assert after <= before + threshold, f"{label}: {before} -> {after} (threshold {threshold})"
 
 
@@ -734,16 +774,18 @@ def assert_input_coordinates_non_increasing(
     session: _FitSession,
     before: float,
 ) -> None:
-    """Check every input-block coordinate from affiliations through centroids."""
+    """Check every input-block coordinate from affiliations through centroids.
+
+    The steps run in ``update_parameters_`` order: the centroid step reads the statistics
+    staged before the feature-weight step, as it does in a fit.
+    """
     inp.update_affiliations_(block, session)
     inp.prune_(block, session)
-    inp.refresh_cache_(block, session)
     after = _loss(session)
     assert_non_increasing(before, after, "affiliations")
 
     before = after
     inp.update_instance_weights_(block, session)
-    inp.refresh_cache_(block, session)
     after = _loss(session)
     assert_non_increasing(before, after, "instance weights")
 
@@ -754,7 +796,6 @@ def assert_input_coordinates_non_increasing(
     after = _loss(session)
     assert_non_increasing(before, after, "feature weights")
 
-    inp.stage_statistics_(block, session)
     before = after
     inp.update_centroids_(block, session)
     inp.refresh_cache_(block, session)
@@ -771,5 +812,4 @@ def assert_head_then_input_non_increasing(session: _FitSession) -> None:
     after = _loss(session)
     assert_non_increasing(before, after, "head")
 
-    head.accumulate_into_source_cost_(session, cost=block.live_cache.disc_cost[:, : block.K])
     assert_input_coordinates_non_increasing(block, session, after)

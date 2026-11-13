@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import torch
 
-from entlearn.primitives.normalise import _eps, floored_log_
-
 
 def entropy(p: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """Return Shannon entropy along ``dim``."""
-    log_p = p.clamp_min(_eps(p.dtype)).log()
-    return -(p * log_p).sum(dim=dim)
+    """Return the Shannon entropy ``-Σ p·log p`` along ``dim``, with ``0·log 0 = 0``.
+
+    The logarithm is exact for every positive entry, including subnormal entries.
+    """
+    return torch.special.entr(p).sum(dim=dim)
 
 
 def effective_dimension(
@@ -55,13 +55,13 @@ def entropy_penalty_(
     *,
     row_weights: torch.Tensor | None = None,
 ) -> None:
-    """Subtract a Shannon-entropy reward from the loss in ``out_scalar``.
+    """Add a negative-entropy penalty to the loss in ``out_scalar``.
 
     With ``H = -Σ p·log p`` over every element of ``p``, applies
     ``out_scalar -= coefficient·H``. When ``row_weights`` is given, each first-axis
-    slice contributes its weight. The log is floored at the dtype machine precision,
-    so zero entries do not contribute. ``log_buffer`` must match ``p``. The caller
-    must zero ``out_scalar`` first.
+    slice contributes its weight. A zero entry contributes
+    ``0·log 0 = 0`` and a positive entry contributes ``-p·log p``.
+    ``log_buffer`` must match ``p``.
 
     Args:
         out_scalar: ``()`` loss accumulator, decreased in place.
@@ -71,9 +71,8 @@ def entropy_penalty_(
         scratch_scalar: ``()`` workspace.
         row_weights: Optional ``(p.shape[0],)`` first-axis weights for a matrix ``p``.
     """
-    floored_log_(log_buffer, p)  # floor + safe-log into log_buffer (p untouched)
-    log_buffer.mul_(p)  # p · log p  (mutates log_buffer)
+    torch.special.entr(p, out=log_buffer)  # -p·log p, zero where p = 0 (p untouched)
     if row_weights is not None:
         log_buffer.mul_(row_weights.unsqueeze(1))
-    torch.sum(log_buffer, dim=tuple(range(log_buffer.ndim)), out=scratch_scalar)  # Σ p·log p = -H
-    out_scalar.add_(scratch_scalar, alpha=coefficient)  # out += coef·Σ p·log p  ==  out -= coef·H
+    torch.sum(log_buffer, dim=tuple(range(log_buffer.ndim)), out=scratch_scalar)  # H
+    out_scalar.sub_(scratch_scalar, alpha=coefficient)  # out -= coef·H

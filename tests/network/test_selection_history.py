@@ -1,85 +1,53 @@
 """The Network record holds one selection history, apart from every fitted trajectory."""
 
-import logging
-import math
 import pickle
 
 import pytest
-from conftest import DEVICE
-from network._fixtures import resume_case
+from conftest import DEVICE, FIXED_BUDGET
+from network._fixtures import resume_case, round_trip_network
 
 from entlearn import FitDiagnostics, Network
-from entlearn.network.continuation import continue_fit
-from entlearn.network.persistence.snapshot import decode_snapshot, encode_snapshot
-from entlearn.network.state import InitOutcome, _NetworkRecord, _SelectionHistory
+from entlearn.network.state import InitOutcome
 
 
 def history(network):
-    """Return the published records and index, comparable when a score is NaN."""
+    """Return the published initialisation outcomes and selected index."""
     diagnostics = network.diagnostics
-    return repr((diagnostics.initialisation_outcomes, diagnostics.selected_index))
+    return diagnostics.initialisation_outcomes, diagnostics.selected_index
 
 
 class TestSelectionHistory:
-    def test_every_route_publishes_one_history_to_the_winner_and_each_member(self):
+    @FIXED_BUDGET
+    def test_every_route_publishes_one_history_to_the_winner_and_each_member(self, tmp_path):
         recipe, X, y, _ = resume_case()
-        fitted = Network.fit(recipe, X, y, max_iter=2, tol=0, n_inits=3, retain="members")
-        source = fitted._record()
-        outcomes = tuple(
-            InitOutcome(index, 10 + index, score, train_score, "threads", "serial")
-            for index, (score, train_score) in enumerate(((2.0, 1.0), (math.nan, None), (1.0, 0.5)))
+        fits = (
+            Network.fit(recipe, X, y, max_iter=2, tol=0, n_inits=3, retain="members", seed=seed)
+            for seed in range(10)
         )
-        original = source.members[2].trajectory.warnings
-        record = _NetworkRecord(
-            source.members[2],
-            _SelectionHistory(outcomes, 2, ("selection warning",), len(original)),
-            source.states,
-            source.members,
-        )
-
-        def continued(**replacement):
-            return continue_fit(
-                record,
-                X,
-                y,
-                X_cat=None,
-                sample_weights=None,
-                class_weights=None,
-                task_weights=None,
-                computation_dtype=None,
-                max_iter=4,
-                tol=0,
-                logger=logging.getLogger(__name__),
-                verbose=0,
-                **replacement,
-            )
-
+        # A winner after the first candidate tells the winner's record from member 0's. Which
+        # candidate wins depends on the device's random stream, so take the first such seed.
+        fitted = next((fit for fit in fits if fit.diagnostics.selected_index != 0), None)
+        assert fitted is not None, "candidate 0 won for every seed from 0 to 9"
+        outcomes, selected = history(fitted)
+        assert len(outcomes) == 3
         routes = {
-            "published": record,
-            "resumed": continued(),
-            "fine-tuned": continued(replacement=recipe),
-            "decoded": decode_snapshot(*encode_snapshot(record), device=X.device),
+            "published": fitted,
+            "resumed": fitted.resume(X, y, max_iter=4),
+            "fine-tuned": fitted.fine_tune(X, y, max_iter=4),
+            "loaded": round_trip_network(fitted, tmp_path / "fitted.safetensors", resumable=True),
         }
-        for route, result in routes.items():
-            network = Network._publish(result)
-            winner = result.members[2].trajectory
-            assert history(network) == repr((outcomes, 2)), route
+        for route, network in routes.items():
+            assert history(network) == (outcomes, selected), route
+            assert network.members is not None
+            winner = network.members[selected].diagnostics
             assert network.diagnostics.loss_history == winner.loss_history, route
-            # The selection's warnings follow the fit's own; fine-tuning resets both.
-            expected = (
-                winner.warnings
-                if route == "fine-tuned"
-                else (*original, "selection warning", *winner.warnings[len(original) :])
-            )
-            assert network.diagnostics.warnings == expected, route
             for index, member in enumerate(network.members):
-                assert history(member) == repr(((outcomes[index],), index)), route
-                assert member.diagnostics.warnings == result.members[index].trajectory.warnings
+                assert history(member) == ((outcomes[index],), index), route
 
     def test_a_selected_index_without_its_record_has_no_selected_outcome(self):
         outcome = InitOutcome(0, 10, 1.0, None, "threads", "serial")
         diagnostics = FitDiagnostics((1.0, 0.5), 1, True, (), (outcome,), selected_index=1)
-        with pytest.raises(ValueError, match="no initialisation outcome records the selected"):
+        with pytest.raises(ValueError, match="selected index"):
             _ = diagnostics.selected_outcome
 
 

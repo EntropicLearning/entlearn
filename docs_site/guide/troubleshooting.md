@@ -69,7 +69,7 @@ print(network.diagnostics.warnings)
 Other warnings about the input data and the initialisation are emitted before fitting starts, and are not retained.
 
 ??? question "What should I do about a `ConvergenceWarning`?"
-    The fit stopped at `max_iter` iterations, while the relative change of the loss was still larger than `tol`.
+    The fit stopped at `max_iter` iterations, before an iteration met the [stopping test](../concepts/learning.md#convergence-and-stopping) for `tol`.
     The returned network is still usable, but you can increase `max_iter` or loosen `tol`.
     You can also [continue the fit](networks.md#continue-fitting) with `resume`.
 
@@ -79,7 +79,8 @@ With several initialisations, a single `ConvergenceWarning` lists every candidat
 This is likely a bug.
 
 ??? question "What should I do about a `LossIncreaseWarning`?"
-    Check the data for extreme values, and consider fitting in float64.
+    Especially in float32, try centring continuous features before fitting (`X - X.mean(dim=0)` in PyTorch, or `StandardScaler(with_std=False)` in a scikit-learn pipeline), and rescale extreme values if needed.
+    If this does not help, consider fitting in float64.
 
     If the warning remains, please report it to the maintainers as an [issue on the entlearn repository](https://github.com/EntropicLearning/entlearn/issues).
     
@@ -92,4 +93,4 @@ Categorical feature order, fitted cardinalities, and the meaning of each class c
 
 ## Unstable or disappointing predictions
 
-Before concluding that the model is not performing well on your problem, try more independent initialisations and potentially automatic hyperparameter optimization on held-out data. See [Model selection](model_selection.md) for examples.
+Before concluding that the model is unsuitable for your problem, try more independent initialisations and a hyperparameter search on held-out data. See [Model selection](model_selection.md) for examples.

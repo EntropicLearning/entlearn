@@ -26,6 +26,19 @@ PAGE_SETUP = {
         '    "label": ["low", "low", "low", "high", "high", "high"],\n'
         "}).lazy()\n"
     ),
+    "guide/plotting.md": (
+        "import torch\n"
+        "from entlearn import ClassificationHead, Hidden, Input, ManifoldInput, Network, Recipe\n"
+        "generator = torch.Generator().manual_seed(0)\n"
+        "X = torch.rand(60, 3, generator=generator, dtype=torch.float64)\n"
+        "y = (X[:, 0] > 0.5).long()\n"
+        "X_cat = None\n"
+        "recipe = Recipe.chain(Input(K=4, epsilon=0.05), Hidden(K=3, epsilon=0.2), ClassificationHead())\n"
+        "network = Network.fit(recipe, X, y)\n"
+        "manifold = Recipe.chain(ManifoldInput(K=3, epsilon=0.05, subspace_dimension=2), ClassificationHead())\n"
+        "manifold_network = Network.fit(manifold, X, y)\n"
+        "probes = X[:5]\n"
+    ),
     "guide/manifold.md": (
         "import numpy as np\n"
         "t = np.linspace(0, 1, 12)\n"
@@ -39,14 +52,9 @@ class TestScaffoldCode:
     @pytest.mark.parametrize(
         "page",
         [
-            "guide/package.md",
-            "guide/networks.md",
-            "guide/estimators.md",
-            "guide/hyperparameters.md",
-            "guide/model_selection.md",
-            "guide/manifold.md",
-            "guide/installation.md",
-            "guide/troubleshooting.md",
+            path.relative_to(DOCS_ROOT).as_posix()
+            for path in sorted((DOCS_ROOT / "guide").glob("*.md"))
+            if "```python" in path.read_text(encoding="utf-8")
         ],
     )
     def test_python_examples_execute_in_page_order(

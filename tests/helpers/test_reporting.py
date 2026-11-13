@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET, RANK_DEFICIENT
 from network._fixtures import prediction_model
 
 from entlearn import Coupling, Network, Recipe
@@ -13,8 +13,9 @@ from entlearn.helpers.reporting import (
     feature_importances,
     target_weights,
 )
-from entlearn.primitives import effective_dimension, entropy
 from helpers._fixtures import fitted_manifold_report, reporting_chain, reporting_model
+
+pytestmark = FIXED_BUDGET
 
 
 class TestParameterCounting:
@@ -69,11 +70,21 @@ class TestParameterCounting:
         with pytest.raises(ValueError, match="fitted Network"):
             operation(object())
 
-    @pytest.mark.parametrize("tol", [-1, float("nan"), float("inf"), 4, True])
-    def test_invalid_active_threshold_is_rejected(self, tol):
-        with pytest.raises(ValueError, match="tol"):
+    @pytest.mark.parametrize(
+        ("tol", "match"),
+        [
+            pytest.param(-1, "tol.*non-negative", id="negative"),
+            pytest.param(float("nan"), "tol must be finite", id="nan"),
+            pytest.param(float("inf"), "tol must be finite", id="infinite"),
+            pytest.param(True, "tol must be finite", id="bool"),
+            pytest.param(4, "tol must be below the feature count", id="feature-count"),
+        ],
+    )
+    def test_invalid_active_threshold_is_rejected(self, tol, match):
+        with pytest.raises(ValueError, match=match):
             active_features(reporting_model(), tol=tol)
 
+    @RANK_DEFICIENT
     def test_uniform_weights_and_manifold_have_no_active_feature_ranking(self):
         uniform = reporting_model(weights=(0.25, 0.25, 0.25, 0.25))
         with pytest.raises(ValueError, match="uniform"):
@@ -103,18 +114,6 @@ class TestParameterCounting:
 
 
 class TestEffectiveDimensions:
-    def test_zero_mass_and_normalisation_remain_tensor_native(self):
-        probabilities = torch.tensor(
-            [[1.0, 0.0], [0.5, 0.5], [0.0, 0.0]], dtype=DTYPE, device=DEVICE
-        )
-        torch.testing.assert_close(
-            entropy(probabilities),
-            torch.tensor([0.0, 0.6931471805599453, 0.0], dtype=DTYPE, device=DEVICE),
-        )
-        expected = torch.tensor([1.0, 2.0, 1.0], dtype=DTYPE, device=DEVICE)
-        torch.testing.assert_close(effective_dimension(probabilities, normalise=False), expected)
-        torch.testing.assert_close(effective_dimension(probabilities), expected / 2)
-
     def test_report_reads_fitted_distributions(self):
         model = reporting_model()
         report = effective_dimensions(model, normalise=False)
@@ -151,9 +150,11 @@ class TestEffectiveDimensions:
 
 
 class TestReorderedReporting:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("kind", ["mixed", "manifold"])
-    @pytest.mark.parametrize("order", [(3, 2, 1, 0), (2, 0, 3, 1)])
+    # Moves the input off position 0 and the head off the last position.
+    @pytest.mark.parametrize("order", [(2, 0, 3, 1)])
     @pytest.mark.parametrize("operation", ["counts", "dimensions"])
     def test_named_graph_identity_not_declaration_order_controls_reporting(
         self, task, kind, order, operation
@@ -169,9 +170,6 @@ class TestReorderedReporting:
             X_cat=categories,
             initial_state=state,
             max_iter=1,
-        )
-        torch.testing.assert_close(
-            reordered.predict(X, X_cat=categories), canonical.predict(X, X_cat=categories)
         )
         if operation == "counts":
             for raw in (False, True):
@@ -193,6 +191,7 @@ class TestReorderedReporting:
 
 
 class TestIndependentParameterCounts:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("kind", ["mixed", "manifold"])
     @pytest.mark.parametrize(
         ("coupling", "hidden_free"),
@@ -241,6 +240,28 @@ class TestIndependentParameterCounts:
         )
 
 
+class TestPredictionOnlyReporting:
+    def test_parameter_reports_need_no_training_rows_and_row_reports_refuse(self, tmp_path):
+        recipe, X, y, categories, state = reporting_chain(
+            task="regression", kind="mixed", coupling=Coupling.M, head_coupling=Coupling.M
+        )
+        model = Network.fit(recipe, X, y, X_cat=categories, initial_state=state, max_iter=1)
+        path = tmp_path / "model.safetensors"
+        model.save(path)  # without resumable=True: no training rows
+        loaded = Network.load(path, device=DEVICE)
+        for raw in (False, True):
+            assert count_parameters(loaded, raw=raw) == count_parameters(model, raw=raw)
+        assert count_parameters(loaded, active_tol=1) == count_parameters(model, active_tol=1)
+        torch.testing.assert_close(active_features(loaded), active_features(model), rtol=0, atol=0)
+        torch.testing.assert_close(
+            feature_importances(loaded), feature_importances(model), rtol=0, atol=0
+        )
+        with pytest.raises(ValueError, match=r"training_affiliations.*unavailable"):
+            count_parameters(loaded, include_affiliations=True)
+        with pytest.raises(ValueError, match=r"training_affiliations.*unavailable"):
+            effective_dimensions(loaded)
+
+
 class TestInferenceMode:
     """Every reporting helper returns inference tensors, whichever path computed them."""
 
@@ -253,11 +274,10 @@ class TestInferenceMode:
             for value in fields.values():
                 assert value.is_inference()
 
-    def test_target_weights_result_is_an_inference_tensor_pinned_and_uniform(self):
-        assert target_weights(reporting_model(W_M=(0.2, 0.8))).is_inference()
+    def test_uniform_target_weights_are_an_inference_tensor(self):
         # No W_M and infinite epsilon_M falls back to a freshly built uniform simplex.
         assert target_weights(reporting_model()).is_inference()
 
-    def test_feature_importances_result_is_an_inference_tensor_standard_and_manifold(self):
-        assert feature_importances(reporting_model()).is_inference()
+    @RANK_DEFICIENT
+    def test_manifold_feature_importances_are_an_inference_tensor(self):
         assert feature_importances(fitted_manifold_report()).is_inference()

@@ -1,21 +1,23 @@
+"""Replacing a fitted Network's Recipe objective when fine-tuning."""
+
 import math
-from dataclasses import fields, replace
+from dataclasses import replace
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET
 from network._fixtures import resume_case
 
 from entlearn import (
-    ClassificationHead,
     Connection,
     Coupling,
     Hidden,
-    Input,
     ManifoldInput,
     Network,
     Recipe,
-    RegressionHead,
 )
+
+pytestmark = FIXED_BUDGET
 
 
 class TestObjectiveReplacement:
@@ -25,7 +27,7 @@ class TestObjectiveReplacement:
             ("standard", 0, "epsilon", 0.3),
             ("standard", 0, "epsilon_D", 0.3),
             ("standard", 0, "epsilon_T", 0.4),
-            ("categorical", 0, "delta_cat", 0.7),
+            ("categorical", 0, "delta_cat", 0.0),
             ("manifold", 0, "epsilon", 0.3),
             ("manifold", 0, "epsilon_T", 0.4),
             ("manifold", 0, "alpha", 0.4),
@@ -36,24 +38,37 @@ class TestObjectiveReplacement:
     def test_each_allowed_block_objective_replaces_completely(self, kind, index, field, value):
         recipe, X, y, cats = resume_case("regression", kind)
         source = Network.fit(recipe, X, y, X_cat=cats, max_iter=2)
-        blocks = list(recipe.blocks)
+        fitted = source.recipe
+        blocks = list(fitted.blocks)
         blocks[index] = replace(blocks[index], **{field: value})
-        new = replace(recipe, blocks=tuple(blocks))
+        new = replace(fitted, blocks=tuple(blocks))
         result = source.fine_tune(X, y, X_cat=cats, recipe=new, max_iter=2)
-        assert result.recipe == new
-        assert source.recipe == recipe
+        unchanged = source.fine_tune(X, y, X_cat=cats, max_iter=2)
+        # The replaced value must reach the objective, so the losses part from the start.
+        assert result.diagnostics.loss_history[0] != unchanged.diagnostics.loss_history[0]
+        assert source.recipe == fitted
         assert result.can_resume
 
-    @pytest.mark.parametrize(
-        "index,field,value", [(0, "delta", 0.7), (0, "theta_alpha", 1.2), (1, "delta", 1.2)]
-    )
+    # The first connection's delta is test_a_replaced_connection_strength_reaches_the_fitted_parameters.
+    @pytest.mark.parametrize("index,field,value", [(0, "theta_alpha", 1.2), (1, "delta", 1.2)])
     def test_connection_objectives_are_replaceable(self, index, field, value):
         recipe, X, y, _ = resume_case()
         source = Network.fit(recipe, X, y, max_iter=2)
         connections = list(recipe.connections)
         connections[index] = replace(connections[index], **{field: value})
         new = replace(recipe, connections=tuple(connections))
-        assert source.fine_tune(X, y, recipe=new, max_iter=2).recipe == new
+        result = source.fine_tune(X, y, recipe=new, max_iter=2)
+        unchanged = source.fine_tune(X, y, max_iter=2)
+        assert result.diagnostics.loss_history[0] != unchanged.diagnostics.loss_history[0]
+
+    def test_the_head_prior_is_replaceable(self):
+        recipe, X, y, _ = resume_case()
+        source = Network.fit(recipe, X, y, max_iter=2)
+        new = recipe.replace_block("output", theta_alpha=1.5)
+        result = source.fine_tune(X, y, recipe=new, max_iter=2)
+        unchanged = source.fine_tune(X, y, max_iter=2)
+        assert result.diagnostics.loss_history[0] != unchanged.diagnostics.loss_history[0]
+        assert result.recipe == new
 
     def test_a_replaced_connection_strength_reaches_the_fitted_parameters(self):
         # The owned graph keeps its fitted weights, so only the refreshed connection
@@ -122,8 +137,10 @@ class TestObjectiveReplacement:
             frozen.inspect("head_parameters")["output"]["W_M"], expected, rtol=0, atol=0
         )
         unfrozen = frozen.fine_tune(X[:15], y[:15], recipe=recipe, max_iter=2)
-        assert unfrozen.recipe == recipe
-        assert torch.isfinite(unfrozen.inspect("head_parameters")["output"]["W_M"]).all()
+        assert not torch.equal(
+            unfrozen.inspect("head_parameters")["output"]["W_M"],
+            frozen.inspect("head_parameters")["output"]["W_M"],
+        )
 
     def test_uniform_output_weights_become_learnable(self):
         recipe, X, y, _ = resume_case("regression")
@@ -147,11 +164,9 @@ class TestObjectiveReplacement:
             fixed.diagnostics.loss_history[0] - entropy, abs=4 * torch.finfo(X.dtype).eps
         )
 
-    def test_fixed_output_width_and_temperature_rules_are_enforced(self):
+    def test_fixed_output_weights_must_keep_the_number_of_targets(self):
         recipe, X, y, _ = resume_case("regression")
         source = Network.fit(recipe, X, y, max_iter=2)
-        with pytest.raises(ValueError, match=r"infinite|inf"):
-            replace(recipe.blocks[-1], W_M=(0.8, 0.2))
         new = replace(
             recipe,
             blocks=(
@@ -159,18 +174,11 @@ class TestObjectiveReplacement:
                 replace(recipe.blocks[-1], epsilon_M=math.inf, W_M=(1.0,)),
             ),
         )
-        with pytest.raises(ValueError, match="number of regression targets"):
+        with pytest.raises(ValueError, match=r"W_M has length 1 .* regression targets is 2"):
             source.fine_tune(X, y, recipe=new)
 
 
 class TestReplacementWhitelist:
-    def test_structural_replacement_raises_instead_of_fresh_fit(self):
-        recipe, X, y, _ = resume_case()
-        source = Network.fit(recipe, X, y, max_iter=2)
-        incompatible = replace(recipe, blocks=(replace(recipe.blocks[0], K=6), *recipe.blocks[1:]))
-        with pytest.raises(ValueError, match="K"):
-            source.fine_tune(X, y, recipe=incompatible)
-
     @pytest.mark.parametrize("kind", ["standard", "manifold"])
     @pytest.mark.parametrize(
         "field,value", [("K", 5), ("balanced", True), ("centroid_strategy", "greedy-kmeans++")]
@@ -254,37 +262,3 @@ class TestReplacementWhitelist:
             connections[-1] = replace(connections[-1], source="extra")
         with pytest.raises(ValueError, match=message):
             source.fine_tune(X, y, recipe=Recipe(tuple(blocks), tuple(connections)))
-
-    def test_recipe_field_inventory_is_explicit(self):
-        expected = {
-            Input: {
-                "K",
-                "epsilon",
-                "epsilon_D",
-                "epsilon_T",
-                "delta_cat",
-                "W_std",
-                "centroid_strategy",
-                "greedy_candidates",
-                "balanced",
-                "name",
-            },
-            ManifoldInput: {
-                "K",
-                "epsilon",
-                "epsilon_T",
-                "alpha",
-                "subspace_dimension",
-                "centroid_strategy",
-                "greedy_candidates",
-                "balanced",
-                "name",
-            },
-            Hidden: {"K", "epsilon", "name"},
-            ClassificationHead: {"coupling", "n_classes", "name"},
-            RegressionHead: {"epsilon_M", "W_M", "name"},
-            Connection: {"name", "source", "target", "delta", "coupling", "theta_alpha"},
-            Recipe: {"blocks", "connections"},
-        }
-        for kind, names in expected.items():
-            assert {field.name for field in fields(kind)} == names

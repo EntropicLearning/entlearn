@@ -12,6 +12,7 @@ import torch
 from entlearn import ClassificationHead, Hidden, RegressionHead
 from entlearn.helpers.reporting import feature_importances
 from entlearn.plotting.basic import CLASS_COLOURS, CLUSTER_COLOURS, _numpy, _palette
+from entlearn.primitives.normalise import _tiny
 
 if TYPE_CHECKING:
     from entlearn import Network
@@ -42,13 +43,13 @@ def _leads_to(network: Network, block: str) -> tuple[torch.Tensor, bool]:
                 return C_y @ lead, False
             case _:
                 raise ValueError(f"plot_parallel cannot follow block {target.name!r}")
-        lead = step / step.sum(dim=0, keepdim=True).clamp_min(torch.finfo(lead.dtype).tiny) @ lead
+        lead = step / step.sum(dim=0, keepdim=True).clamp_min(_tiny(lead.dtype)) @ lead
         if isinstance(target, ClassificationHead):
             return lead, True
         name = target.name
 
 
-def plot_parallel(
+def plot_parallel(  # noqa: C901
     network: Network,
     X: torch.Tensor,
     y: Any = None,

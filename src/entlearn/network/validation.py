@@ -38,6 +38,14 @@ def _validate_prediction_features(
     return X, categorical
 
 
+def _all_finite(values: torch.Tensor) -> bool:
+    """Whether every value is finite, read without a temporary the size of ``values``."""
+    # A NaN or an infinity always reaches the sum, so only an overflowing total needs the range.
+    return bool(values.sum().isfinite()) or bool(
+        torch.stack(torch.aminmax(values)).isfinite().all()
+    )
+
+
 def _validate_storage(values: torch.Tensor, *, name: str) -> None:
     """Require ordinary strided storage on a device that contains data."""
     if values.layout != torch.strided:
@@ -54,7 +62,7 @@ def _validate_distribution_rows(
     precision: torch.dtype | None = None,
 ) -> None:
     """Require simplex rows, allowing an explicit precision for converted fitted state."""
-    if not bool(torch.isfinite(values).all()):
+    if not _all_finite(values):
         raise ValueError(f"{name} must contain only finite values")
     if bool((values < 0).any()):
         raise ValueError(f"{name} must be non-negative")
@@ -85,12 +93,14 @@ def _validate_continuous(
     if computation_dtype is not None and computation_dtype not in _FLOAT_DTYPES:
         raise ValueError("computation_dtype must be torch.float32 or torch.float64")
     staged = X_cont if computation_dtype is None else X_cont.to(dtype=computation_dtype)
-    if not bool(torch.isfinite(staged).all()):
-        raise ValueError("X_cont must be a non-empty finite float32 or float64 matrix")
+    if not _all_finite(staged):
+        raise ValueError(
+            "X_cont contains NaN, infinity or a value too large for the computation dtype"
+        )
     return staged
 
 
-def _stage_classification_target(
+def _stage_classification_target(  # noqa: C901
     target: object,
     *,
     rows: int,
@@ -166,7 +176,7 @@ def _stage_weights(
     ):
         raise ValueError(f"{name} must be a length-{length} floating tensor on the X_cont device")
     staged = weights.to(dtype=dtype)
-    if not bool(torch.isfinite(staged).all()):
+    if not _all_finite(staged):
         raise ValueError(f"{name} must contain only finite values")
     if positive and not bool((staged > 0).all()):
         raise ValueError(f"{name} must be positive; drop zero-weight rows instead")
@@ -229,13 +239,15 @@ def _stage_regression_target(
             UserWarning,
         )
     labelled = ~any_missing
+    if not bool(labelled.any()):
+        raise ValueError("regression y must contain a labelled row")
     if bool(torch.isinf(staged[labelled]).any()):
         raise ValueError("labelled regression y values must be finite")
     staged = torch.where(labelled[:, None], staged, torch.zeros((), dtype=dtype, device=device))
     return staged, labelled, staged.shape[1]
 
 
-def _validate_categorical(
+def _validate_categorical(  # noqa: C901
     X_cat: Sequence[torch.Tensor] | None,
     *,
     rows: int,

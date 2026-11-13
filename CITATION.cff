@@ -7,7 +7,7 @@ authors:
     family-names: Bassetti
   - given-names: Michael
     family-names: Groom
-version: 0.1.0
+version: 0.1.1
 license: AGPL-3.0-only
 repository-code: "https://github.com/EntropicLearning/entlearn"
 url: "https://entropiclearning.github.io/entlearn/"

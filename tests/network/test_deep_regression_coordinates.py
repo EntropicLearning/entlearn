@@ -30,7 +30,7 @@ _OUTPUT_WEIGHT_IDS = ("implicit-uniform", "fixed", "learned-hard", "learned-soft
 @pytest.mark.parametrize(("epsilon_M", "W_M"), _OUTPUT_WEIGHT_CASES, ids=_OUTPUT_WEIGHT_IDS)
 class TestDeepRegressionCoordinates:
     @pytest.mark.parametrize("weighted", (False, True), ids=("uniform-rows", "weighted-masked"))
-    def test_head_adds_the_analytical_residual_to_the_live_hidden_cost(
+    def test_head_adds_the_analytical_residual_less_its_row_constant_to_the_live_hidden_cost(
         self, coupling: Coupling, epsilon_M: float, W_M: tuple[float, ...] | None, weighted: bool
     ) -> None:
         session = deep_regression_session(
@@ -52,7 +52,10 @@ class TestDeepRegressionCoordinates:
             if head.W_M is not None
             else torch.full((M,), 1.0 / M, dtype=DTYPE, device=DEVICE)
         )
-        squared_residual = (session.data.target[:, :, None] - head.C_y[None, :, :]).square()
+        # The residual ‖y_t - c_k‖² without ‖y_t‖², which shifts row t's costs equally.
+        squared_residual = head.C_y[None, :, :] * (
+            head.C_y[None, :, :] - 2 * session.data.target[:, :, None]
+        )
         expected = initial_cost + graph.connection_into(head).delta * (
             supervision.row_weights[:, None]
             * session.data.labelled[:, None]
@@ -63,6 +66,8 @@ class TestDeepRegressionCoordinates:
 
         torch.testing.assert_close(cost, expected)
 
+    # Seeding caps a hidden block wider than the hard input's distinct profiles.
+    @pytest.mark.filterwarnings("ignore:hidden block:UserWarning")
     @pytest.mark.parametrize("epsilon", (0.0, 0.2), ids=("hard", "soft"))
     @pytest.mark.parametrize("widths", ((4, 3), (3, 5), (4, 3, 2)))
     @pytest.mark.parametrize("weighted", (False, True), ids=("uniform-rows", "weighted-masked"))
@@ -111,9 +116,6 @@ class TestDeepRegressionCoordinates:
             assert_non_increasing(before, after, f"{name} incoming connection")
             before = after
 
-        graph.accumulate_outgoing_cost_(
-            graph.input, graph.input.live_cache.disc_cost[:, : graph.input.K], session
-        )
         assert_input_coordinates_non_increasing(graph.input, session, before)
 
     def test_complete_iteration_allocates_no_tensor_storage(

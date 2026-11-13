@@ -37,12 +37,12 @@ def _on_grid(
         for i in range(3)
     ]
     grid = torch.stack([g.flatten() for g in torch.meshgrid(*axes, indexing="ij")], dim=1)
-    points = X.median(dim=0).values.repeat(len(grid), 1)
-    points[:, features] = grid.to(X.device)
-    return points
+    points = X.cpu().median(dim=0).values.repeat(len(grid), 1)
+    points[:, features] = grid
+    return points.to(X.device)
 
 
-def plot_manifold(
+def plot_manifold(  # noqa: C901
     network: Network,
     X: torch.Tensor,
     y: Any = None,
@@ -100,10 +100,10 @@ def plot_manifold(
     C = network.inspect("continuous_centroids")[block]
     bases = network.inspect("manifold_projectors")[block]
     axes = list(features)
-    if len(axes) != 3 or len(set(axes)) != 3 or not all(0 <= i < C.shape[1] for i in axes):
-        raise ValueError(
-            f"features must name three different continuous features, from 0 to {C.shape[1] - 1}"
-        )
+    if len(axes) != 3 or len(set(axes)) != 3:
+        raise ValueError(f"features must name three different continuous features; got {axes}")
+    if not all(0 <= i < C.shape[1] for i in axes):
+        raise ValueError(f"features must be from 0 to {C.shape[1] - 1}; got {axes}")
     if bases.shape[2] > 2:
         raise ValueError(
             f"plot_manifold draws lines and planes only; block {block!r} has "

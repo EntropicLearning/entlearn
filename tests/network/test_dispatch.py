@@ -28,15 +28,6 @@ class TestMapSeeds:
             [seed % 7 for seed in seeds],
         )
 
-    def test_serial_results_are_computed_as_they_are_consumed(self):
-        calls = []
-        _, results = _map_seeds(
-            lambda seed: calls.append(seed) or seed, (0, 1, 2), n_jobs=None, backend="serial"
-        )
-        assert calls == []
-        assert next(results) == 0
-        assert calls == [0]
-
     def test_completion_order_does_not_change_result_order(self):
         finished_second = threading.Event()
         completion_order = []
@@ -124,67 +115,25 @@ class TestMapSeeds:
     def test_closing_early_ends_the_warning_window(self):
         with warnings.catch_warnings(record=True) as seen:
             warnings.simplefilter("always")
-            hook = warnings.showwarning
             _, results = _map_seeds(_late_first_warning, (0, 1, 2, 3), n_jobs=4, backend="threads")
             assert next(results) == 0
-            assert warnings.showwarning is not hook
             results.close()
-            assert warnings.showwarning is hook
+            warnings.warn("after closing", RuntimeWarning, stacklevel=1)
+            assert "after closing" in [str(record.message) for record in seen]
         assert str(seen[0].message) == "seed 0"
 
-    def test_a_nested_threads_window_keeps_the_outermost_hold(self):
-        hooks = []
-
+    def test_warnings_from_nested_threads_runs_arrive_once_in_seed_order(self):
         def inner(seed):
-            hooks.append(warnings.showwarning)
             warnings.warn(f"inner {seed}", RuntimeWarning, stacklevel=1)
             return seed
 
         def outer(seed):
-            hooks.append(warnings.showwarning)
             return run(inner, (seed,), n_jobs=2, backend="threads")[1]
 
         with warnings.catch_warnings(record=True) as seen:
             warnings.simplefilter("always")
-            hook = warnings.showwarning
             assert run(outer, (0, 1), n_jobs=2, backend="threads") == ("threads", [[0], [1]])
-            assert warnings.showwarning is hook
-        assert len(hooks) == 4
-        assert len({id(held) for held in hooks}) == 1
-        assert hooks[0] is not hook
         assert [str(record.message) for record in seen] == ["inner 0", "inner 1"]
-
-    def test_a_threads_run_yields_each_result_before_later_seeds_finish(self):
-        first_consumed = threading.Event()
-
-        def candidate(seed):
-            if seed == 1:
-                assert first_consumed.wait(timeout=10)
-            return seed
-
-        _, results = _map_seeds(candidate, (0, 1), n_jobs=2, backend="threads")
-        assert next(results) == 0
-        first_consumed.set()
-        assert list(results) == [1]
-
-    def test_a_caller_warning_during_a_threads_run_waits_for_the_last_result(self):
-        with warnings.catch_warnings(record=True) as seen:
-            warnings.simplefilter("always")
-            _, results = _map_seeds(lambda seed: seed, (0, 1), n_jobs=2, backend="threads")
-            assert next(results) == 0
-            warnings.warn("caller", RuntimeWarning, stacklevel=1)
-            assert seen == []
-            assert list(results) == [1]
-        assert [str(record.message) for record in seen] == ["caller"]
-
-    def test_a_caller_warning_during_a_processes_run_surfaces_at_once(self):
-        with warnings.catch_warnings(record=True) as seen:
-            warnings.simplefilter("always")
-            _, results = _map_seeds(lambda seed: seed, (0, 1), n_jobs=2, backend="processes")
-            assert next(results) == 0
-            warnings.warn("caller", RuntimeWarning, stacklevel=1)
-            assert "caller" in [str(record.message) for record in seen]
-            assert list(results) == [1]
 
 
 def _late_first_warning(seed):

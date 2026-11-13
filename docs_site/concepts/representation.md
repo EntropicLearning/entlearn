@@ -9,18 +9,18 @@ This page introduces these representations. [The objective](loss.md) combines th
 
 ## Observations and affiliations
 
-Let $T$ be the amount of training observations, and the input block (block $0$) be followed by $N$ hidden blocks. Block $n$ has $K_n$ clusters and an affiliation matrix $\Gamma^{(n)}$ of shape $T\times K_n$. The row $\gamma_t^{(n)}$ describes observation $t$'s membership in its clusters:
+Let $T$ be the number of training observations, and the input block (block $0$) be followed by $N$ hidden blocks. Block $n$ has $K_n$ clusters and an affiliation matrix $\Gamma^{(n)}$ of shape $T\times K_n$. The row $\gamma_t^{(n)}$ describes observation $t$'s membership in its clusters:
 
 $$
 \Gamma_{tk}^{(n)}\geq 0,\qquad \sum_k\Gamma_{tk}^{(n)}=1.
 $$
 
 A hard affiliation affiliates observations to one cluster only.
-A soft affiliation, instead, distributes it among more clusters.
+A soft affiliation, instead, distributes an observation's membership among several clusters.
 Each clustering block has its own temperature `epsilon`, which controls the regime through the [affiliation update](learning.md#affiliation-updates).
 
-For example, a row $(0.8,0.2)$ assigns most membership to the first cluster.
-Thus, this observation can contribute to both clusters' fitted parameters and to the prediction formed from those parameters.
+For example, a row $(0.8,0.2)$ assigns most membership to the first cluster and the rest to the second.
+This observation therefore contributes to both clusters' fitted parameters and to the prediction formed from those parameters.
 
 The input block's affiliations depend on feature-space errors.
 Hidden affiliations depend on the connections on either side during fitting.
@@ -53,12 +53,15 @@ d_{tk}=\sum_{d=1}^{D_{\mathrm{cont}}} W_D[d](X_{td}-C_{kd})^2
 \mathrm{CE}(X^{\mathrm{cat}}_{j,t,:},C^{\mathrm{cat}}_{j,k,:}).
 $$
 
-Here $\mathrm{CE}(p,q)=-\sum_i p_i\log q_i$.
+Here $\mathrm{CE}(p,q)=-\sum_i p_i\log q_i$, with each logarithm evaluated as $\log(\max(q_i,\texttt{tiny}))$, where $\texttt{tiny}=\texttt{torch.finfo(dtype).tiny}$ is the dtype's smallest positive normal number.
+A probability at or below $\texttt{tiny}$ is numerically zero, so this floor keeps the cost of a zero probability finite and leaves the logarithm of every other probability exact, however small. A floor at machine precision would instead change the cost of small probabilities that the dtype represents exactly.
+The finite cost is set by the dtype rather than the data: an observed level whose centroid probability is at or below $\texttt{tiny}$ costs $\delta_{\mathrm{cat}}s_j(-\log\texttt{tiny})$ before feature weighting, about 430 in float64 and 53 in float32 for $M_j=3$ and $\delta_{\mathrm{cat}}=1$.
 Feature weights $W_D$ form one probability vector over continuous features followed by categorical features.
 Each categorical feature receives one weight regardless of the cardinality of its support.
 
 The scale $s_j$ adjusts the contribution for the number of categorical levels.
-`delta_cat`, whose default is one, controls the contribution of categorical errors relative to continuous errors.
+`delta_cat` controls the contribution of categorical errors relative to continuous errors.
+When it is not set, fitting sets it to the value at which an uninformative categorical feature costs as much as an uninformative continuous one, computed by [`delta_cat_guess`](../reference/helpers.md#entlearn.helpers.delta_cat_guess), or to 1 when the data have no varying continuous feature or no categorical feature with at least two levels.
 
 ??? note "Deriving the categorical scale"
     The categorical scale is $s_j=(1-1/M_j)/\log M_j$. Against a uniform centroid, an observed level has scaled cross-entropy $1-1/M_j$. This equals the squared distance from a one-hot vector of length $M_j$ to the uniform vector. The scale is fixed and derived from the number of levels.
@@ -69,10 +72,11 @@ A `ManifoldInput` represents each cluster by a centroid $c_k$ and an orthonormal
 They define an affine plane through the centroid, with error:
 
 $$
-g_k(x_t)=\Vert(I-U_kU_k^\top)(x_t-c_k)\Vert^2+\alpha\Vert x_t-c_k\Vert^2.
+g_k(x_t)=\frac{1}{D_{\mathrm{cont}}}\left(\Vert(I-U_kU_k^\top)(x_t-c_k)\Vert^2+\alpha\Vert x_t-c_k\Vert^2\right).
 $$
 
 The first term is the squared distance from the plane, and the second penalises distance from its centre with strength `alpha`.
+The error is an expectation over the features, as in the standard input block. The temperatures and `delta` therefore keep their scale as the feature count grows, and the [search ranges](../guide/model_selection.md#choosing-search-ranges) suit both inputs.
 
 Manifold inputs support continuous features and instance weights.
 They have no categorical features or feature weights. `network.inspect("manifold_projectors")` returns the bases $U_k$. The [Manifold guide](../guide/manifold.md) provides more examples on the topic.
@@ -85,7 +89,7 @@ The connection's coupling selects its normalisation:
 
 | Coupling | Constraint | Interpretation |
 | --- | --- | --- |
-| `Coupling.M`, Markov's style, the default | Each column sums to one | Column $k'$ is a distribution over target clusters given source cluster $k'$ |
+| `Coupling.M`, Markov (the default) | Each column sums to one | Column $k'$ is a distribution over target clusters given source cluster $k'$ |
 | `Coupling.S`, simplex | Each row sums to one | Row $k$ describes target cluster $k$ as a distribution over source clusters |
 
 Both use the same [coupling expression](loss.md#coupling-terms).

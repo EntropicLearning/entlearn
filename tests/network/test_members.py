@@ -21,7 +21,9 @@ from entlearn import ClassificationHead, Coupling, ManifoldInput, Network, Predi
 class TestMemberRetention:
     @pytest.mark.parametrize("n_inits", [1, 3])
     @pytest.mark.parametrize("retain", ["winner", "states", "members"])
-    def test_retention_matrix(self, n_inits, retain):
+    def test_each_retention_mode_keeps_its_collections_and_replays_the_winner(
+        self, n_inits, retain
+    ):
         X, y = blobs(2, 0.1)
         recipe = classification_recipe()
         network = Network.fit(
@@ -73,12 +75,6 @@ class TestMemberRetention:
         else:
             with pytest.raises(ValueError, match='retain="members"'):
                 network.predict_all(X)
-
-    @pytest.mark.parametrize("retain", ["all", "Members", True, None])
-    def test_retain_rejects_values_outside_the_three_modes(self, retain):
-        X, y = blobs(2, 0.1)
-        with pytest.raises(ValueError, match="retain must be 'winner', 'states' or 'members'"):
-            Network.fit(classification_recipe(), X, y, retain=retain, max_iter=3)
 
     def test_later_winner_retains_its_original_state_without_optional_collections(self):
         X, y = blobs(3, 0.1)
@@ -152,12 +148,12 @@ class TestMemberRetention:
     def test_single_member_prediction_and_complete_override(self):
         X, y = blobs(2, 0.1)
         network = Network.fit(classification_recipe(), X, y, retain="members", max_iter=3)
-        assert torch.equal(network.predict_all(X)[0], network.predict(X))
-        config = PredictConfig(output_mode="arithmetic")
-        assert torch.equal(
-            network.predict_all(X, predict_config=config)[0],
-            network.predict(X, predict_config=config),
-        )
+        default = network.predict(X)
+        assert torch.equal(network.predict_all(X)[0], default)
+        config = PredictConfig(epsilon_P=0.7)
+        override = network.predict(X, predict_config=config)
+        assert not torch.equal(override, default)
+        assert torch.equal(network.predict_all(X, predict_config=config)[0], override)
 
     @pytest.mark.parametrize(
         "backend,n_jobs", [("threads", None), ("threads", 2), ("processes", 2)]
@@ -279,7 +275,7 @@ class TestMemberRetention:
             network.predict_all(X[:3], X_cat=(y[:3],))[0],
             network.predict(X[:3], X_cat=(y[:3],)),
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="X_cat must contain 1 fitted"):
             network.predict_all(X[:3])
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"predict_config .*exact PredictConfig"):
             network.predict_all(X[:3], X_cat=(y[:3],), predict_config=object())

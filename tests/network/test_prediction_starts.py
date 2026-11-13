@@ -4,9 +4,12 @@ from dataclasses import replace
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET
 from network._fixtures import prediction_model
 
 from entlearn import Coupling, PredictConfig
+
+pytestmark = FIXED_BUDGET
 
 
 class TestPredictionStarts:
@@ -47,7 +50,9 @@ class TestPredictionStarts:
                 symmetric, torch.full_like(symmetric, 1 / symmetric.shape[1])
             )
         else:
-            torch.testing.assert_close(symmetric[0], model._graph.head.C_y.mean(dim=1))
+            name = model.recipe.blocks[-1].name
+            C_y = model.inspect("head_parameters")[name]["C_y"]
+            torch.testing.assert_close(symmetric[0], C_y.mean(dim=1))
         seeded = model.predict(X, predict_config=config, predict_init=41)
         again = model.predict(X, predict_config=config, predict_init=41)
         other = model.predict(X, predict_config=config, predict_init=42)
@@ -61,8 +66,10 @@ class TestPredictionStarts:
         result = model.predict(X, predict_config=policy, predict_init="arithmetic")
         torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
-    @pytest.mark.parametrize("bad", ["negative", "sum", "device"])
-    def test_classification_tensor_checks_simplex_and_device(self, bad):
+    @pytest.mark.parametrize(
+        "bad,reason", [("negative", "non-negative"), ("sum", "sum to one"), ("device", "device")]
+    )
+    def test_classification_tensor_checks_simplex_and_device(self, bad, reason):
         model, X, _ = prediction_model()
         start = model.predict(X).clone()
         if bad == "negative":
@@ -71,23 +78,37 @@ class TestPredictionStarts:
             start[0] *= 0.5
         else:
             start = torch.empty(start.shape, dtype=start.dtype, device="meta")
-        with pytest.raises(ValueError, match="predict_init"):
+        with pytest.raises(ValueError, match=f"predict_init.*{reason}"):
             model.predict(
                 X, predict_config=PredictConfig(predict_mode="iterative"), predict_init=start
             )
 
-    @pytest.mark.parametrize("task", ["classification", "regression"])
-    @pytest.mark.parametrize("bad", ["wrong", "geometric", True, 2.5, -1, 2**63])
-    def test_bad_symbolic_start_fails_before_staging(self, task, bad):
+    @pytest.mark.parametrize(
+        "task,bad,message",
+        [
+            # Each task accepts only its own words.
+            ("classification", "mean", r"one of \('arithmetic', 'uniform'\)"),
+            ("regression", "uniform", r"one of \('mean',\)"),
+            ("regression", "arithmetic", r"one of \('mean',\)"),
+            # A boolean is not a seed, and a seed is an integer in range.
+            ("classification", True, "integer seed or one of"),
+            ("classification", 2.5, "integer seed or one of"),
+            ("classification", -1, r"seed .*\[0, 2\*\*63\)"),
+            ("classification", 2**63, r"seed .*\[0, 2\*\*63\)"),
+        ],
+    )
+    def test_bad_symbolic_start_fails_before_staging(self, task, bad, message):
         model, _, _ = prediction_model(task)
-        with pytest.raises(ValueError, match=r"predict_init|seed"):
+        with pytest.raises(ValueError, match=message):
             model.predict(
                 None, predict_config=PredictConfig(predict_mode="iterative"), predict_init=bad
             )
 
     @pytest.mark.parametrize("task", ["classification", "regression"])
-    @pytest.mark.parametrize("bad", ["shape", "dtype", "nan", "inf"])
-    def test_invalid_tensor_is_rejected(self, task, bad):
+    @pytest.mark.parametrize(
+        "bad,reason", [("shape", "shape"), ("dtype", "computation dtype"), ("nan", "finite")]
+    )
+    def test_invalid_tensor_is_rejected(self, task, bad, reason):
         model, X, _ = prediction_model(task)
         start = model.predict(X)
         if bad == "shape":
@@ -97,7 +118,7 @@ class TestPredictionStarts:
         else:
             start = start.clone()
             start[0, 0] = float(bad)
-        with pytest.raises(ValueError, match="predict_init"):
+        with pytest.raises(ValueError, match=f"predict_init.*{reason}"):
             model.predict(
                 X, predict_config=PredictConfig(predict_mode="iterative"), predict_init=start
             )

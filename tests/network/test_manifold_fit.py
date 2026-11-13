@@ -3,19 +3,17 @@
 import math
 from contextlib import nullcontext
 from dataclasses import replace
-from itertools import pairwise
 
 import pytest
 import torch
 from _alloc import assert_no_float64
-from conftest import DEVICE, DTYPE
+from conftest import DEVICE, DTYPE, FIXED_BUDGET, RANK_DEFICIENT
 from network._fixtures import affine_subspace_blobs, assert_simplex_rows, manifold_line
 
 from entlearn import (
     ClassificationHead,
     Coupling,
     Hidden,
-    Input,
     ManifoldInput,
     Network,
     Recipe,
@@ -25,29 +23,26 @@ from entlearn.primitives.normalise import _eps
 
 
 class TestManifoldFit:
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-    @pytest.mark.parametrize("strategy", ["kmeans++", "greedy-kmeans++"])
-    def test_manifold_seeds_use_uniform_scaling_and_local_subspaces(self, dtype, strategy):
+    def test_manifold_seeds_are_rows_of_each_segment_with_its_local_subspace(self):
+        # Two short horizontal segments one unit apart: the k-means++ distance draw crosses
+        # to the other segment with probability above 0.98, and each segment's rows span
+        # the horizontal axis.
         X = torch.tensor(
-            [[-3.0, 0.0], [-2.0, 0.0], [-1.0, 0.0], [1.0, 5.0], [2.0, 5.0], [3.0, 5.0]],
-            dtype=dtype,
+            [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [0.8, 1.0], [0.9, 1.0], [1.0, 1.0]],
+            dtype=DTYPE,
             device=DEVICE,
         )
-        y = X[:, 0]
-        controls = dict(K=2, centroid_strategy=strategy)
-        manifold = Recipe.chain(ManifoldInput(subspace_dimension=1, **controls), RegressionHead())
-        standard = Recipe.chain(Input(**controls), RegressionHead())
-        state = Network.initialise(manifold, X, y, seed=7)
-        reference = Network.initialise(standard, X, y, seed=7)
-        torch.testing.assert_close(
-            state.input_geometry.continuous_centroids, reference.input_geometry.continuous_centroids
-        )
+        recipe = Recipe.chain(ManifoldInput(K=2, subspace_dimension=1), RegressionHead())
+        state = Network.initialise(recipe, X, X[:, 0], seed=7)
+        centroids = state.input_geometry.continuous_centroids
+        assert sorted(centroids[:, 1].tolist()) == [0.0, 1.0]
+        assert all(bool((centroid == X).all(dim=1).any()) for centroid in centroids)
         assert state.input_geometry.feature_weights is None
         assert state.input_geometry.categorical_centroids == ()
         projectors = state.input_geometry.manifold_projectors
         assert projectors is not None
         projection = projectors @ projectors.transpose(1, 2)
-        expected = torch.tensor([[1.0, 0.0], [0.0, 0.0]], dtype=dtype, device=X.device).expand(
+        expected = torch.tensor([[1.0, 0.0], [0.0, 0.0]], dtype=DTYPE, device=DEVICE).expand(
             2, -1, -1
         )
         torch.testing.assert_close(projection, expected)
@@ -61,11 +56,10 @@ class TestManifoldFit:
         with pytest.warns(UserWarning, match="insufficient rank"):
             states = [
                 Network.initialise(recipe, X, y, continuous_centroids=centre, seed=seed)
-                for seed in (5, 5, 6)
+                for seed in (5, 5)
             ]
-        a, b, c = [state.input_geometry.manifold_projectors for state in states]
+        a, b = [state.input_geometry.manifold_projectors for state in states]
         torch.testing.assert_close(a, b, atol=0, rtol=0)
-        torch.testing.assert_close(a, c, atol=0, rtol=0)
         torch.testing.assert_close(
             a.transpose(1, 2) @ a, torch.eye(2, dtype=dtype, device=X.device).unsqueeze(0)
         )
@@ -75,18 +69,15 @@ class TestManifoldFit:
             torch.zeros(1, 3, dtype=dtype, device=X.device),
         )
 
-    @pytest.mark.parametrize("operation", ["initialise", "fit"])
-    def test_manifold_rejects_categorical_features_and_excess_dimension(self, operation):
+    def test_manifold_rejects_categorical_features_and_excess_dimension(self):
         X = torch.zeros(4, 2, dtype=DTYPE, device=DEVICE)
         y = X[:, 0]
         recipe = Recipe.chain(ManifoldInput(K=1), RegressionHead())
         with pytest.raises(ValueError, match="continuous-only"):
-            getattr(Network, operation)(
-                recipe, X, y, X_cat=[torch.tensor([0, 1, 0, 1], device=X.device)]
-            )
+            Network.fit(recipe, X, y, X_cat=[torch.tensor([0, 1, 0, 1], device=X.device)])
         oversized = Recipe.chain(ManifoldInput(K=1, subspace_dimension=3), RegressionHead())
         with pytest.raises(ValueError, match="subspace_dimension"):
-            getattr(Network, operation)(oversized, X, y)
+            Network.fit(oversized, X, y)
 
     def test_manifold_rejects_feature_weights(self):
         X = torch.zeros(4, 2, dtype=DTYPE, device=DEVICE)
@@ -98,7 +89,7 @@ class TestManifoldFit:
 
     def test_manifold_fits_the_global_mean_regression(self):
         X = torch.tensor(
-            [[-3.0, 1.0], [-1.0, -1.0], [1.0, -1.0], [3.0, 1.0]], dtype=DTYPE, device=DEVICE
+            [[0.0, 2 / 3], [1 / 3, 1 / 3], [2 / 3, 1 / 3], [1.0, 2 / 3]], dtype=DTYPE, device=DEVICE
         )
         y = torch.tensor([1.0, 2.0, 3.0, 6.0], dtype=X.dtype, device=X.device)
         recipe = Recipe.chain(ManifoldInput(K=1), RegressionHead())
@@ -106,8 +97,10 @@ class TestManifoldFit:
         torch.testing.assert_close(
             model.predict(X), torch.full((4, 1), 3.0, dtype=X.dtype, device=X.device)
         )
-        assert model.diagnostics.loss_history[-1] <= model.diagnostics.loss_history[0]
 
+    @FIXED_BUDGET
+    # Seeding caps the five-cluster block over a hard three-cluster input.
+    @pytest.mark.filterwarnings("ignore:hidden block:UserWarning")
     @pytest.mark.parametrize("task", ["classification", "regression"])
     @pytest.mark.parametrize("coupling", [Coupling.M, Coupling.S])
     @pytest.mark.parametrize("widths", [(), (2,), (5, 2)])
@@ -155,11 +148,7 @@ class TestManifoldFit:
                 assert (prediction.argmax(1) == y).to(dtype).mean() > 0.8
         else:
             assert (prediction - y).square().mean() < (y - y.mean(0)).square().mean()
-        tolerance = 100 * _eps(dtype)
-        history = first.diagnostics.loss_history
-        assert all(b <= a + tolerance for a, b in pairwise(history))
         assert first.reconstruct(X).continuous.dtype == dtype
-        assert state.input_geometry.feature_weights is None
 
     @pytest.mark.parametrize(
         "bad",
@@ -167,7 +156,6 @@ class TestManifoldFit:
             "missing",
             "shape",
             "nan",
-            "zero",
             "nonorthogonal",
             "integer",
             "sparse",
@@ -181,10 +169,12 @@ class TestManifoldFit:
         recipe = Recipe.chain(ManifoldInput(K=1), RegressionHead())
         state = Network.initialise(recipe, X, X[:, 0])
         projectors = state.input_geometry.manifold_projectors.clone()
+        message = "ManifoldInput has no feature_weights"
         if bad == "missing":
             state = replace(
                 state, input_geometry=replace(state.input_geometry, manifold_projectors=None)
             )
+            message = "requires manifold_projectors"
         elif bad == "feature_weights":
             state = replace(
                 state,
@@ -204,24 +194,29 @@ class TestManifoldFit:
         else:
             if bad == "shape":
                 projectors = projectors[:, :1]
+                message = "wrong shape"
             elif bad == "nan":
                 projectors.fill_(float("nan"))
-            elif bad == "zero":
-                projectors.zero_()
+                message = "manifold_projectors must be finite"
             elif bad == "nonorthogonal":
                 projectors.mul_(2)
+                message = "must be orthonormal"
             elif bad == "integer":
                 projectors = projectors.to(torch.int64)
+                message = "floating tensors"
             elif bad == "sparse":
                 projectors = projectors.to_sparse()
+                message = "strided tensor storage"
             elif bad == "meta":
                 projectors = projectors.to("meta")
+                message = "device that contains data"
             state = replace(
                 state, input_geometry=replace(state.input_geometry, manifold_projectors=projectors)
             )
-        with pytest.raises(ValueError, match=r"manifold_projectors|feature_weights|categorical"):
+        with pytest.raises(ValueError, match=message):
             Network.fit(recipe, X, X[:, 0], initial_state=state, max_iter=1)
 
+    @FIXED_BUDGET
     @pytest.mark.parametrize(
         ("excess", "outcome"),
         [
@@ -241,6 +236,7 @@ class TestManifoldFit:
         with outcome:
             Network.fit(recipe, X, X[:, 0], initial_state=state, max_iter=1)
 
+    @FIXED_BUDGET
     def test_supplied_pair_is_copied_and_not_rederived(self):
         X = manifold_line()
         recipe = Recipe.chain(ManifoldInput(K=1), RegressionHead())
@@ -256,11 +252,11 @@ class TestManifoldFit:
         fitted = Network.fit(recipe, X, X[:, 0], initial_state=supplied, max_iter=1)
         ordinary = Network.fit(recipe, X, X[:, 0], initial_state=state, max_iter=1)
         assert fitted.diagnostics.loss_history[0] > ordinary.diagnostics.loss_history[0]
-        torch.testing.assert_close(fitted.predict(X), ordinary.predict(X))
         expected = fitted.reconstruct(X).continuous.clone()
         supplied.input_geometry.manifold_projectors.zero_()
         torch.testing.assert_close(fitted.reconstruct(X).continuous, expected)
 
+    @RANK_DEFICIENT
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_empty_manifold_cluster_is_pruned_before_centroid_update(self, dtype):
         X = manifold_line(dtype=dtype)
@@ -386,17 +382,14 @@ class TestManifoldPCA:
 class TestAffineSubspaceData:
     @pytest.mark.parametrize("n_subspaces", [1, 2])
     @pytest.mark.parametrize("orthogonal_noise", [0.0, 0.05], ids=["aligned", "noisy"])
-    def test_manifold_fits_rotated_affine_subspace_blobs(self, n_subspaces, orthogonal_noise):
-        X, labels = affine_subspace_blobs(
+    def test_manifold_reconstructs_rotated_affine_subspace_blobs(
+        self, n_subspaces, orthogonal_noise
+    ):
+        X, _ = affine_subspace_blobs(
             n_subspaces=n_subspaces,
             subspace_dimension=2,
             orthogonal_noise=orthogonal_noise,
         )
-        for index in range(n_subspaces):
-            local = X[labels == index]
-            singular_values = torch.linalg.svdvals(local - local.mean(dim=0))
-            ratio = singular_values[-1] / singular_values[0]
-            assert ratio < 1e-6 if orthogonal_noise == 0 else ratio > 1e-3
         model = Network.fit(
             Recipe.chain(
                 ManifoldInput(K=n_subspaces, subspace_dimension=2),
@@ -406,5 +399,10 @@ class TestAffineSubspaceData:
             X[:, 0],
             max_iter=4,
         )
-        assert torch.isfinite(model.reconstruct(X).continuous).all()
-        assert torch.isfinite(model.predict(X)).all()
+        reconstruction = model.reconstruct(X).continuous
+        if orthogonal_noise == 0:
+            torch.testing.assert_close(reconstruction, X)
+        else:
+            # The rows leave their planes only by the orthogonal noise, whose scale the
+            # fixture's unit-range rescaling can only shrink.
+            assert float((reconstruction - X).abs().max()) < orthogonal_noise

@@ -30,19 +30,20 @@ class _BuiltRecipe:
 
 
 def _build_recipe(recipe: Recipe) -> _BuiltRecipe:
-    """Build one connected chain in stable topological order."""
+    """Build one connected chain with ``epsilon_ratio`` and ``delta_ratio`` resolved."""
     order = recipe.stable_order()
-    edges = {(connection.source, connection.target) for connection in recipe.connections}
-    if len(recipe.connections) != len(order) - 1 or edges != set(pairwise(order)):
+    resolved = recipe.resolve_ratios()
+    edges = {(connection.source, connection.target) for connection in resolved.connections}
+    if len(resolved.connections) != len(order) - 1 or edges != set(pairwise(order)):
         raise ValueError("the builder only supports one connected chain")
-    by_name = {block.name: block for block in recipe.blocks}
+    by_name = {block.name: block for block in resolved.blocks}
     blocks = tuple(by_name[name] for name in order)
     incoming = {
-        name: tuple(connection for connection in recipe.connections if connection.target == name)
+        name: tuple(connection for connection in resolved.connections if connection.target == name)
         for name in order
     }
     outgoing = {
-        name: tuple(connection for connection in recipe.connections if connection.source == name)
+        name: tuple(connection for connection in resolved.connections if connection.source == name)
         for name in order
     }
 
@@ -56,7 +57,7 @@ def _build_recipe(recipe: Recipe) -> _BuiltRecipe:
     return _BuiltRecipe(
         recipe=recipe,
         topological_blocks=blocks,
-        connections=recipe.connections,
+        connections=resolved.connections,
         incoming=incoming,
         outgoing=outgoing,
         input=input_block,

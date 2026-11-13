@@ -1,3 +1,15 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "entlearn[plotting,rich,sklearn]",
+#     "marimo",
+#     "optuna",
+#     "optuna-integration[sklearn]",
+#     "pandas",
+#     "scipy",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.24.0"
@@ -6,6 +18,8 @@ app = marimo.App(width="medium", css_file="entlearn.css")
 
 @app.cell
 def _():
+    import warnings
+
     import numpy as np
     import optuna
     import pandas as pd
@@ -15,6 +29,14 @@ def _():
     from sklearn.base import clone
     from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
 
+    # OptunaSearchCV reports scores through deprecated optuna.terminator on every trial.
+    # Keep other deprecations and warnings visible.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"^`optuna\.terminator` module has been deprecated",
+        category=FutureWarning,
+        module=r"^optuna_integration\.sklearn\.sklearn$",
+    )
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     return (
         FloatDistribution,
@@ -228,8 +250,12 @@ def _(mo):
     The result of a fit also depends on where it starts. There are a few ways to pick a good starting point:
 
     - In the `Input` block, `centroid_strategy="greedy-kmeans++"` tries several candidates for each centroid, and `balanced=True` gives every class at least one centroid.
-    - `n_inits` fits several starting points and keeps the best one. By default the best is the one with the lowest training loss; with `cv`, it is the one with the best validation score.
-    - `initial_state` gives a fit a fixed starting point. Build a few with `Network.initialise` and add them to a grid as one more parameter: the search then picks a starting point together with `K` and `epsilon`, and every setting is compared from the same starts. Here the states are built only from the 50 rows that are in both training folds, so the validation rows do not shape them.
+    - `n_inits` fits several starting points for one recipe and keeps the best according to the selection criterion. Set `cv` to compare them on validation folds.
+    - `initial_state` gives a fit a fixed starting point. A search can compare a list of these states together with the hyperparameters.
+
+    ### Compare starting points for one recipe
+
+    The next cell keeps `K=4` and `epsilon=0.015` fixed, compares five starts, and selects by validation log loss. The diagnostics record each candidate's log loss; smaller is better.
     """)
     return
 
@@ -259,8 +285,24 @@ def _(
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ### Search over fixed starting points
+
+    The previous cell chose a start for one recipe. Now let `GridSearchCV` choose a starting point **together with `K` and `epsilon`**. This is an alternative to having each fit generate its own starts.
+
+    1. Build five initial states, with seeds 0 to 4. Use only the 50 rows shared by both training folds, so neither fold's validation rows influence the starting geometry.
+    2. Build each state for the largest `K` in the grid, 12. A smaller `K` uses the first `K` centroids of that state.
+    3. Add the states as the `initial_state` axis of the grid. Set `n_inits=1`: each fit uses its supplied state, rather than generating more starts.
+
+    The same five states are compared at every hyperparameter setting. The grid has 10 values of `K`, 10 values of `epsilon`, and 5 states: **500 combinations**, each evaluated on the two folds. The selected combination is then refitted on all 100 development rows.
+    """)
+    return
+
+
 @app.cell
-def _(GridSearchCV, X_train, clone, estimator_template, folds, np, y_train):
+def _(GridSearchCV, X_train, clone, estimator_template, folds, mo, np, y_train):
     import torch
 
     from entlearn import Network
@@ -289,7 +331,14 @@ def _(GridSearchCV, X_train, clone, estimator_template, folds, np, y_train):
         error_score="raise",
     ).fit(X_train, y_train)
 
-    shared_grid.best_score_, states.index(shared_grid.best_params_["initial_state"])
+    best_parameters = shared_grid.best_params_
+    selected_state_index = states.index(best_parameters["initial_state"])
+    mo.md(
+        f"Selected **state {selected_state_index}** (seed {selected_state_index}), "
+        f"**K={best_parameters['recipe__blocks__features__K']}**, and "
+        f"**epsilon={best_parameters['recipe__blocks__features__epsilon']}**.\n\n"
+        f"Mean validation accuracy over the two folds: **{shared_grid.best_score_:.3f}**."
+    )
     return
 
 

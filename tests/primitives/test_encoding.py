@@ -5,17 +5,19 @@ import torch
 from conftest import DEVICE
 
 from entlearn.primitives.encoding import densify_categorical, split_wd
-from primitives._fixtures import SEEDS, generator
 
 
 class TestDensifyCategorical:
-    @pytest.mark.parametrize("seed", SEEDS)
     @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
-    def test_matches_inline_pattern_bitwise(self, seed, dtype):
-        codes = torch.randint(0, 5, (17,), generator=generator(seed), device=DEVICE)
-        got = densify_categorical([codes], [5], dtype)
-        expected = torch.nn.functional.one_hot(codes, 5).to(dtype)
-        assert got[0].dtype is dtype
+    def test_codes_become_one_hot_rows(self, dtype):
+        codes = torch.tensor([0, 2, 1], device=DEVICE)
+        got = densify_categorical([codes], [4], dtype)
+        expected = torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=dtype,
+            device=DEVICE,
+        )
+        assert got[0].dtype == dtype
         assert torch.equal(got[0], expected)
 
     def test_codes_read_only(self):

@@ -5,7 +5,9 @@ from itertools import pairwise
 
 import pytest
 import torch
+from conftest import FIXED_BUDGET, RANK_DEFICIENT
 from network._fixtures import (
+    assert_non_increasing,
     prediction_coordinate_loss,
     prediction_model,
     prediction_refinement,
@@ -13,10 +15,12 @@ from network._fixtures import (
 
 from entlearn import Coupling, PredictConfig
 from entlearn.network.blocks.input_common import recover_instance_weights_
-from entlearn.network.fit import loss_noise_threshold
+
+pytestmark = FIXED_BUDGET
 
 
 class TestPredictionCoordinateMonotonicity:
+    @RANK_DEFICIENT
     @pytest.mark.parametrize(
         "task,head,readout",
         [
@@ -73,7 +77,7 @@ class TestPredictionCoordinateMonotonicity:
         )
         assert torch.isfinite(result.prediction).all()
         for previous, current in pairwise(result.loss_history):
-            assert current <= previous + 256 * torch.finfo(X.dtype).eps * max(1, abs(previous))
+            assert_non_increasing(previous, current, "prediction iteration", X.dtype)
         torch.testing.assert_close(model.predict(X, X_cat=categories), before, rtol=0, atol=0)
         if result.instance_weights is not None:
             assert ((result.instance_weights >= 0) & (result.instance_weights <= 1)).all()
@@ -116,6 +120,4 @@ def _assert_every_coordinate_descends(model, X, categories, readout):
             before = prediction_coordinate_loss(state)
             update()
             after = prediction_coordinate_loss(state)
-            assert after <= before + loss_noise_threshold(before, X.dtype), (
-                f"{name}, iteration {iteration + 1}: loss increased from {before} to {after}"
-            )
+            assert_non_increasing(before, after, f"{name}, iteration {iteration + 1}", X.dtype)
