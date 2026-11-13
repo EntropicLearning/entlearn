@@ -1,0 +1,56 @@
+/* The interactive figures drawn by javascripts/figures.js. */
+.eon-figure {
+  --eon-blue: #5267df;
+  --eon-orange: #e87830;
+  --eon-guide: #757575;
+  --plot-background: var(--md-default-bg-color);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 440px;
+  margin: 1.5rem auto;
+}
+
+[data-md-color-scheme="slate"] .eon-figure {
+  --eon-blue: #8594ff;
+  --eon-orange: #ff9447;
+  --eon-guide: #a0a0a0;
+}
+
+/* The data across the first row, the two components side by side below it. */
+.eon-figure#pca-label-loss {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 620px;
+}
+
+.eon-figure#pca-label-loss > :first-child {
+  grid-column: 1 / -1;
+}
+
+.eon-figure > div:has(label) {
+  display: grid;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.eon-figure label {
+  display: grid;
+  font-size: 0.75rem;
+}
+
+.eon-figure input[type="range"] {
+  width: 100%;
+  accent-color: var(--md-accent-fg-color);
+}
+
+.eon-figure svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.eon-figure figure {
+  margin: 0;
+  max-width: 100%;
+}
